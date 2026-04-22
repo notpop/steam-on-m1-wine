@@ -4,9 +4,56 @@ Reproducible, script-driven setup for running the Windows **Steam** client
 on an Apple Silicon (M-series) Mac via Homebrew-packaged Wine — no paid
 compatibility layer required.
 
-> **Status:** experimental.
+> **Status:** v0.1 — Steam UI renders, Japanese reads, login works.
 > Tracks the upstream state of Wine, DXMT, and Steam as of April 2026.
 > Targets macOS Tahoe 26.x on M1 / M2 / M3 / M4 hardware.
+
+## What works (v0.1)
+
+On the reference machine (M1 MacBook Pro 13" 2020, 16 GB, macOS Tahoe
+26.4) `scripts/launch-steam.sh` produces a Steam window with fully
+rendered store, library, and navigation, all Japanese UI text rendered
+with Hiragino Sans GB, and a working login session against Valve's
+servers. Stats from the successful run:
+
+- Steam client build 1773426488 (CEF / Chromium 126.0.6478.183)
+- Wine 11.0 stable (Homebrew cask, x86_64 under Rosetta 2)
+- `--type=` subprocesses collapsed to a single `crashpad-handler`
+- No more `cross-process swapchain not supported` errors
+- No new `SwapChain11::reset` / `EGL_BAD_ALLOC` / `handshake failed`
+  entries in `cef_log.txt` after cold launch
+
+## How it gets there
+
+The working combination is:
+
+1. **Wine 11.0 stable** (Homebrew cask, quarantine stripped)
+2. **DXMT v0.74** installed into the Wine bundle and prefix
+   (kept for future GPU-accelerated runs; bypassed in the current
+   `--disable-gpu` launch configuration)
+3. A **self-compiled `steamwebhelper` wrapper** that renames the Valve
+   binary to `steamwebhelper_real.exe` and prepends
+   `--disable-gpu --single-process` to every invocation. This
+   collapses renderer / utility / gpu-process back into the browser
+   process, dodging:
+   - DXMT Issue #141 (no cross-process D3D11 swapchain)
+   - Wine's flaky winsock path inside Chromium's out-of-process
+     NetworkService
+4. **`-noverifyfiles -no-cef-sandbox`** passed to `Steam.exe` so the
+   wrapper is not checksum-swapped back to Valve's binary at boot
+5. **Japanese font substitution** registry (`Replacements` under
+   `HKCU\Software\Wine\Fonts\`) so logical Windows font names resolve
+   to Hiragino Sans GB instead of Liberation Sans
+
+## Known limits at v0.1
+
+- `--disable-gpu` is a software-raster fallback. The DXMT pieces are
+  in place for the day DXMT ships cross-process swapchain support,
+  but the current launch configuration does not exercise them.
+- Heavy 3D titles will not be smooth through Wine's CPU composite;
+  this is intended for 2D / idle titles like 幻獣大農場.
+- `scripts/05-fix-ssl.sh` offers `INSTALL_COREFONTS=1` as an opt-in,
+  but it is not required for Japanese UI to render in v0.1.
 
 ## Why this project exists
 

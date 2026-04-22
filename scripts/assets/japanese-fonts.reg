@@ -1,0 +1,45 @@
+REGEDIT4
+
+; Wine font substitution for Japanese glyph coverage.
+;
+; Background
+; ----------
+; Copying .ttc / .otf files into C:\windows\Fonts only makes the
+; files discoverable, not the logical "Windows" font names that
+; applications request. Steam's bootstrap updater asks for MS Shell Dlg
+; and MS UI Gothic; Chromium UI asks for Segoe UI / Tahoma. Without
+; an explicit mapping Wine falls back to Liberation Sans, which has
+; no CJK glyphs, so Japanese text renders as tofu (squares).
+;
+; Target fallback font
+; --------------------
+; Hiragino Sans GB is shipped in /System/Library/Fonts on every
+; macOS install and covers JIS X 0208 + a generous chunk of CJK
+; Unified Ideographs. It is a Chinese face at heart but has the
+; Japanese glyphs needed for Steam's UI strings.
+
+[HKEY_CURRENT_USER\Software\Wine\Fonts\Replacements]
+"MS Shell Dlg"="Hiragino Sans GB"
+"MS Shell Dlg 2"="Hiragino Sans GB"
+"MS UI Gothic"="Hiragino Sans GB"
+"MS Gothic"="Hiragino Sans GB"
+"MS PGothic"="Hiragino Sans GB"
+"MS Mincho"="Hiragino Sans GB"
+"MS PMincho"="Hiragino Sans GB"
+"Microsoft Sans Serif"="Hiragino Sans GB"
+"Tahoma"="Hiragino Sans GB"
+"Segoe UI"="Hiragino Sans GB"
+"Segoe UI Symbol"="Hiragino Sans GB"
+"Arial"="Hiragino Sans GB"
+"Arial Unicode MS"="Hiragino Sans GB"
+"Meiryo"="Hiragino Sans GB"
+"Meiryo UI"="Hiragino Sans GB"
+"Yu Gothic"="YuGothic-Medium"
+"Yu Gothic UI"="YuGothic-Medium"
+
+; Also map the Japanese-localised names that some installers write.
+"メイリオ"="Hiragino Sans GB"
+"ＭＳ ゴシック"="Hiragino Sans GB"
+"ＭＳ Ｐゴシック"="Hiragino Sans GB"
+"ＭＳ 明朝"="Hiragino Sans GB"
+"ＭＳ Ｐ明朝"="Hiragino Sans GB"

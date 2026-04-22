@@ -49,7 +49,40 @@
 #include <string.h>
 #include <wchar.h>
 
-#define EXTRA_FLAG   L"--in-process-gpu"
+/*
+ * Flags prepended to every invocation of steamwebhelper_real.exe.
+ *
+ * --in-process-gpu
+ *     Run the Chromium GPU code inside the browser process. Required
+ *     because DXMT (v0.74) does not yet support cross-process D3D11
+ *     swap chains (https://github.com/3Shain/dxmt/issues/141).
+ *
+ * --single-process
+ *     Collapse renderer and utility (network / storage / data_decoder)
+ *     into the browser process as well. Without this flag the
+ *     renderer still opens a D3D11 SwapChain from its own process and
+ *     hits the same DXMT limitation; the utility process similarly
+ *     opens Chromium's out-of-process NetworkService, which triggers
+ *     the `handshake failed; net_error -100` SSL cascade on Wine's
+ *     winsock implementation. This flag is heavier-handed but matches
+ *     the workaround that DXMT users report actually working.
+ */
+/*
+ * Step 1 of our plan (--in-process-gpu + --single-process + DXMT) merged
+ * every subprocess back into the browser but the browser window still
+ * refused to paint: the DXMT-accelerated composite surface hits
+ * "Cannot use V8 Proxy resolver in single process mode" and related
+ * CEF-in-single-process limits before drawing any HTML.
+ *
+ * Step 2 fallback: give Chromium CPU rasterisation by passing
+ * --disable-gpu. This side-steps DXMT entirely (d3d11 is never
+ * opened), lets CEF fall back to the well-trodden Skia software
+ * path, and keeps --single-process so the renderer-side crash
+ * still doesn't happen.
+ *
+ * For a 2D idle game like 幻獣大農場 software rendering is sufficient.
+ */
+#define EXTRA_FLAGS  L"--disable-gpu --single-process"
 #define REAL_BINARY  L"steamwebhelper_real.exe"
 
 /*
@@ -145,13 +178,13 @@ int wmain(void)
     const wchar_t *tail = args_tail();
     debug_log(L"[wrapper] forwarded args=%ls\n", tail);
 
-    size_t cap = wcslen(real) + wcslen(EXTRA_FLAG) + wcslen(tail) + 8;
+    size_t cap = wcslen(real) + wcslen(EXTRA_FLAGS) + wcslen(tail) + 8;
     wchar_t *cmdline = (wchar_t *)calloc(cap, sizeof(wchar_t));
     if (!cmdline) {
         free(real);
         return 1;
     }
-    _snwprintf(cmdline, cap, L"\"%ls\" %ls %ls", real, EXTRA_FLAG, tail);
+    _snwprintf(cmdline, cap, L"\"%ls\" %ls %ls", real, EXTRA_FLAGS, tail);
     debug_log(L"[wrapper] invoking: %ls\n", cmdline);
 
     STARTUPINFOW si;

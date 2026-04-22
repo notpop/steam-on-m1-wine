@@ -70,4 +70,23 @@ if (( copied == 0 && skipped == 0 )); then
     log_warn "Install Japanese language support in System Settings to pull them down."
 fi
 
+# -- Font substitution registry -----------------------------------------------
+#
+# Copying .ttc / .otf into C:\windows\Fonts makes them discoverable,
+# but logical Windows font names (MS Shell Dlg, MS UI Gothic, Segoe UI …)
+# still resolve to Liberation Sans, which has no CJK glyphs. Register
+# an explicit mapping so Steam's bootstrap dialog and CEF UI render
+# Japanese characters instead of tofu (squares).
+FONT_REG="$REPO_ROOT/scripts/assets/japanese-fonts.reg"
+if [[ -f "$FONT_REG" ]]; then
+    log_info "Applying font substitution registry ($FONT_REG)"
+    # regedit is resolved via the Wine installation, run under Rosetta.
+    wine_run regedit /S "$(wine_run winepath -w "$FONT_REG" 2>/dev/null | tr -d '\r')" 2>/dev/null \
+        || wine_run regedit /S "Z:$FONT_REG" 2>/dev/null \
+        || log_warn "regedit import reported a non-zero exit; font mapping may not be applied"
+    log_ok "Font substitution registry applied"
+else
+    log_warn "Font substitution reg file missing: $FONT_REG"
+fi
+
 log_ok "Prefix ready at $WINEPREFIX"
