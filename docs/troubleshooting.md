@@ -106,6 +106,39 @@ scripts/04-install-dxmt.sh   # reinstalls DXMT DLLs
 scripts/06-install-wrapper.sh
 ```
 
+## Both `steamwebhelper.exe` AND `steamwebhelper_real.exe` have the same size
+
+**Cause.** An old version of `scripts/06-install-wrapper.sh` (before
+the MD5-based check) could copy the wrapper into both slots, erasing
+Valve's original binary.
+
+**Symptom.** `06-install-wrapper.sh` refuses to continue and tells you:
+
+```
+cef.winNN: BOTH steamwebhelper.exe AND steamwebhelper_real.exe
+are wrapper-sized. Valve's original is gone.
+Re-run scripts/03-install-steam.sh to recover.
+```
+
+**Fix.**
+1. Quit Steam completely, then:
+   ```bash
+   pkill -9 -f 'steam\.exe|steamwebhelper|wineserver'
+   ```
+2. Remove the corrupted helper files from the affected directory:
+   ```bash
+   STEAM="$HOME/.wine-steam/drive_c/Program Files (x86)/Steam"
+   rm -f "$STEAM/bin/cef/cef.winNN/steamwebhelper.exe"
+   rm -f "$STEAM/bin/cef/cef.winNN/steamwebhelper_real.exe"
+   ```
+3. Launch Steam once **without** `-noverifyfiles` so its bootstrap
+   re-extracts `bins_cef_winNN.zip.vz` from `Steam/package/`:
+   ```bash
+   "$HOME/.wine-steam/drive_c/Program Files (x86)/Steam/steam.exe"  # via Wine
+   ```
+4. Once the bootstrap dialog reports "Verification complete", quit
+   Steam and rerun `scripts/06-install-wrapper.sh`.
+
 ## Still blank: enable wrapper debug log
 
 Set `STEAMWEBHELPER_WRAPPER_DEBUG=1` in the environment Wine sees. The

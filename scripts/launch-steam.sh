@@ -52,6 +52,37 @@ if [[ -d "$HTMLCACHE" ]]; then
     log_ok "Chromium locks purged"
 fi
 
+# -- 2b. Defensive: re-deploy the steamwebhelper wrapper ----------------------
+# Steam runs a checksum verification during boot that restores the original
+# helper binary, wiping our wrapper. This happens silently so the next
+# launch would otherwise fall back to the black-window regime. We re-run
+# scripts/06-install-wrapper.sh whenever we detect the wrapper has been
+# evicted from any of the cef.winXXX directories.
+WRAPPER_BIN="$REPO_ROOT/wrapper/steamwebhelper.exe"
+if [[ -f "$WRAPPER_BIN" ]]; then
+    wrapper_md5=$(md5 -q "$WRAPPER_BIN")
+    wrapper_needs_redeploy=0
+    while IFS= read -r -d '' cef_dir; do
+        target_md5=$(md5 -q "$cef_dir/steamwebhelper.exe" 2>/dev/null || echo "")
+        if [[ "$target_md5" != "$wrapper_md5" ]]; then
+            wrapper_needs_redeploy=1
+            log_warn "Wrapper missing/overwritten in $(basename "$cef_dir")"
+        fi
+    done < <(find "$WINEPREFIX/drive_c/Program Files (x86)/Steam/bin/cef" \
+        -maxdepth 1 -type d -name "cef.win*" -print0 2>/dev/null)
+
+    if (( wrapper_needs_redeploy == 1 )); then
+        log_info "Re-deploying wrapper via scripts/06-install-wrapper.sh"
+        "$REPO_ROOT/scripts/06-install-wrapper.sh" >/dev/null \
+            || die "Wrapper re-deployment failed"
+        log_ok "Wrapper redeployed"
+    else
+        log_ok "Wrapper integrity verified in all CEF directories"
+    fi
+else
+    log_warn "Compiled wrapper missing at $WRAPPER_BIN — run scripts/06-install-wrapper.sh"
+fi
+
 # -- 3. Build launch environment ---------------------------------------------
 #
 # WINEDLLOVERRIDES (reference: DXMT install guide)
@@ -74,10 +105,33 @@ fi
 
 export WINEPREFIX
 export WINEDEBUG
-export WINEDLLOVERRIDES="dxgi,d3d11,d3d10core=n,b"
 
+# DLL overrides.
+#
+# The DXMT entries (`dxgi,d3d11,d3d10core=n,b`) were needed only while
+# the wrapper asked Chromium to stay GPU-accelerated. In the Step 2
+# fallback path the wrapper tells Chromium `--disable-gpu`, so d3d11
+# is never called and forcing DXMT's native DLLs only adds noise.
+# We leave `bcrypt=b` for BoringSSL hygiene.
+export WINEDLLOVERRIDES="bcrypt=b;ncrypt=b"
+
+# Steam flag set, validated on this hardware:
+#   -no-cef-sandbox       Chromium sandbox relies on Windows integrity
+#                         tokens Wine doesn't model. Must be disabled.
+#   -cef-single-process   Consolidate browser / GPU / renderer into a
+#                         single process. Steam-level equivalent of
+#                         Chromium --single-process. Sidesteps DXMT's
+#                         cross-process swapchain limit (Issue #141).
+#   -noverifyfiles        Disable Steam's executable-checksum integrity
+#                         check. Without this flag Steam rewrites our
+#                         wrapper binary back to Valve's original on every
+#                         launch (bootstrap_log reports
+#                         "Verifying all executable checksums"
+#                         shortly after startup).
 STEAM_ARGS=(
     -no-cef-sandbox
+    -cef-single-process
+    -noverifyfiles
 )
 
 # Clear old log so tailing is unambiguous.
