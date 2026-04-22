@@ -1,0 +1,10 @@
+# ShellCheck configuration for steam-on-m1-wine.
+#
+# - external-sources lets the linter follow `source` directives into files
+#   outside the current argument list (ShellCheck-0.9+ behaviour).
+# - source-path tells it where to look for those files.
+
+external-sources=true
+source-path=SCRIPTDIR
+source-path=scripts
+source-path=scripts/lib

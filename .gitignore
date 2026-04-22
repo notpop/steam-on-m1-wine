@@ -1,0 +1,37 @@
+# Build artifacts
+build/
+dist/
+*.o
+*.obj
+*.dll
+*.exe
+*.pdb
+
+# Downloaded vendor binaries (large, license-restricted, or user-supplied)
+vendor/
+downloads/
+
+# Wine prefixes and caches (user-specific state, can be >5 GB)
+prefix/
+.wine-*
+steam_cache/
+
+# Logs
+*.log
+logs/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# Local overrides
+.env
+.env.local
+config.local.sh
