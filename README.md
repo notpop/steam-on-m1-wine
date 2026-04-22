@@ -4,8 +4,9 @@ Reproducible, script-driven setup for running the Windows **Steam** client
 on an Apple Silicon (M-series) Mac via Homebrew-packaged Wine — no paid
 compatibility layer required.
 
-> **Status:** v0.2 — Steam UI fully rendered in Japanese; game boots to
-> Unity initialization but Present() never reaches the screen.
+> **Status:** v0.3 — DXMT nightly tested, game rendering still blocked.
+> Steam UI is fully functional; the Present() → CAMetalLayer hop
+> remains unresolved in DXMT master HEAD as of 2026-04-23.
 > Tracks the upstream state of Wine, DXMT, and Steam as of April 2026.
 > Targets macOS Tahoe 26.x on M1 / M2 / M3 / M4 hardware.
 
@@ -22,16 +23,24 @@ On the reference machine (M1 MacBook Pro 13" 2020, 16 GB, macOS Tahoe
   engine initialisation (`[Physics::Module]` and `Input initialized`
   in `Player.log`), and registers a macOS window.
 
-## What is still blocked (v0.2)
+## What is still blocked (v0.3)
 
 - **Game rendering** — the game's `Present()` calls never seem to reach
   the `CAMetalLayer` the `NSWindow` is backed by. The window exists
   at 3840x2160 (Retina raw pixels) but stays transparent / lets the
   desktop wallpaper show through. See `docs/troubleshooting.md`.
-- Suspected upstream cause: DXMT v0.74 swapchain present path under
-  macOS Tahoe 26 + Wine 11.0, in the class of DXMT Issue #141. Not yet
-  narrowed down to a single filed issue; a nightly DXMT build is the
-  next experiment.
+- Upstream status as of 2026-04-23: **not fixed in DXMT master HEAD**.
+  We tested the most recent CI artifact (commit `43a16e9`, covering
+  `40fae03` "present rect for d3dkmt" and `719d247` "defatalize
+  IDXGISwapChain1/2/3 stubs"). The symptom shape changed — the game
+  process goes from 100% CPU busy-looping on v0.74 to 0% CPU idle
+  waiting on master — but the final frame never reaches the screen.
+  Full write-up in `docs/dxmt-nightly-experiment.md`.
+- Next experiment: fork DXMT, add traces around
+  `IDXGISwapChain::Present` → `CAMetalLayer.nextDrawable` →
+  `presentDrawable:` and inspect where the macOS Tahoe AppKit
+  lifecycle swallows the frame. Tracked separately in the
+  `experimental/` scripts and the forthcoming fork branch.
 
 ## How it gets there
 
