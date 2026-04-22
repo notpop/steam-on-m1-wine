@@ -35,8 +35,10 @@ VENDOR_DIR="$REPO_ROOT/vendor/dxmt-${DXMT_TAG}"
 TARBALL="$VENDOR_DIR/${DXMT_ASSET}"
 
 WINE_LIB_UNIX="$WINE_APP/Contents/Resources/wine/lib/wine/x86_64-unix"
-WINE_LIB_WIN="$WINE_APP/Contents/Resources/wine/lib/wine/x86_64-windows"
+WINE_LIB_WIN64="$WINE_APP/Contents/Resources/wine/lib/wine/x86_64-windows"
+WINE_LIB_WIN32="$WINE_APP/Contents/Resources/wine/lib/wine/i386-windows"
 PREFIX_SYS32="$WINEPREFIX/drive_c/windows/system32"
+PREFIX_SYSWOW64="$WINEPREFIX/drive_c/windows/syswow64"
 
 log_step "Installing DXMT ${DXMT_TAG}"
 
@@ -76,8 +78,10 @@ tar -xzf "$TARBALL" -C "$EXTRACT_DIR"
 # Find the extracted root regardless of how tar named its top dir.
 src_unix=$(find "$EXTRACT_DIR" -type d -name "x86_64-unix" | head -n1)
 src_win64=$(find "$EXTRACT_DIR" -type d -name "x86_64-windows" | head -n1)
+src_win32=$(find "$EXTRACT_DIR" -type d -name "i386-windows" | head -n1)
 [[ -d "$src_unix"  ]] || die "x86_64-unix not found in tarball"
 [[ -d "$src_win64" ]] || die "x86_64-windows not found in tarball"
+[[ -d "$src_win32" ]] || die "i386-windows not found in tarball"
 
 # -- Place DLLs ---------------------------------------------------------------
 # For a "builtin" DXMT build we need:
@@ -98,13 +102,22 @@ install_file() {
 
 install_file "$src_unix/winemetal.so"  "$WINE_LIB_UNIX/winemetal.so"
 
+# 64-bit DXMT pieces — used by native x86_64 Windows programs
 for dll in winemetal.dll d3d11.dll dxgi.dll d3d10core.dll; do
-    [[ -f "$src_win64/$dll" ]] || die "Tarball missing $dll"
-    install_file "$src_win64/$dll" "$WINE_LIB_WIN/$dll"
+    [[ -f "$src_win64/$dll" ]] || die "Tarball missing x86_64 $dll"
+    install_file "$src_win64/$dll" "$WINE_LIB_WIN64/$dll"
 done
-
-# winemetal.dll is also loaded from the prefix on some codepaths.
 install_file "$src_win64/winemetal.dll" "$PREFIX_SYS32/winemetal.dll"
 
-log_ok "DXMT ${DXMT_TAG} installed"
+# 32-bit DXMT pieces — used by 32-bit Unity / older Windows games like
+# 幻獣大農場 (MonsterFarm.exe). Without these, Wine's 32-bit builtin d3d11
+# stub in syswow64 gets loaded and the game dies at
+# "GfxDevice: creating device client" with no further log output.
+for dll in winemetal.dll d3d11.dll dxgi.dll d3d10core.dll; do
+    [[ -f "$src_win32/$dll" ]] || die "Tarball missing i386 $dll"
+    install_file "$src_win32/$dll" "$WINE_LIB_WIN32/$dll"
+done
+install_file "$src_win32/winemetal.dll" "$PREFIX_SYSWOW64/winemetal.dll"
+
+log_ok "DXMT ${DXMT_TAG} installed (64-bit + 32-bit)"
 log_info "DLL overrides are applied at launch time by scripts/launch-steam.sh"

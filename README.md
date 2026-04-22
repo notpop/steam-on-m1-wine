@@ -4,34 +4,57 @@ Reproducible, script-driven setup for running the Windows **Steam** client
 on an Apple Silicon (M-series) Mac via Homebrew-packaged Wine — no paid
 compatibility layer required.
 
-> **Status:** v0.1 — Steam UI renders, Japanese reads, login works.
+> **Status:** v0.2 — Steam UI fully rendered in Japanese; game boots to
+> Unity initialization but Present() never reaches the screen.
 > Tracks the upstream state of Wine, DXMT, and Steam as of April 2026.
 > Targets macOS Tahoe 26.x on M1 / M2 / M3 / M4 hardware.
 
-## What works (v0.1)
+## What works (v0.2)
 
 On the reference machine (M1 MacBook Pro 13" 2020, 16 GB, macOS Tahoe
-26.4) `scripts/launch-steam.sh` produces a Steam window with fully
-rendered store, library, and navigation, all Japanese UI text rendered
-with Hiragino Sans GB, and a working login session against Valve's
-servers. Stats from the successful run:
+26.4) `scripts/launch-steam.sh` produces:
 
-- Steam client build 1773426488 (CEF / Chromium 126.0.6478.183)
-- Wine 11.0 stable (Homebrew cask, x86_64 under Rosetta 2)
-- `--type=` subprocesses collapsed to a single `crashpad-handler`
-- No more `cross-process swapchain not supported` errors
-- No new `SwapChain11::reset` / `EGL_BAD_ALLOC` / `handshake failed`
-  entries in `cef_log.txt` after cold launch
+- **Steam UI**: fully rendered store, library, and navigation, Japanese
+  text via Hiragino Sans GB, authenticated login against Valve's
+  servers, cart and wishlist visible.
+- **Game launch**: a 32-bit Unity 6000 title (幻獣大農場) spawns, passes
+  `D3D11CreateDevice` (sees `Renderer: Apple M1`), completes Unity
+  engine initialisation (`[Physics::Module]` and `Input initialized`
+  in `Player.log`), and registers a macOS window.
+
+## What is still blocked (v0.2)
+
+- **Game rendering** — the game's `Present()` calls never seem to reach
+  the `CAMetalLayer` the `NSWindow` is backed by. The window exists
+  at 3840x2160 (Retina raw pixels) but stays transparent / lets the
+  desktop wallpaper show through. See `docs/troubleshooting.md`.
+- Suspected upstream cause: DXMT v0.74 swapchain present path under
+  macOS Tahoe 26 + Wine 11.0, in the class of DXMT Issue #141. Not yet
+  narrowed down to a single filed issue; a nightly DXMT build is the
+  next experiment.
 
 ## How it gets there
 
-The working combination is:
+The working combination, from outer layer to inner:
 
-1. **Wine 11.0 stable** (Homebrew cask, quarantine stripped)
-2. **DXMT v0.74** installed into the Wine bundle and prefix
-   (kept for future GPU-accelerated runs; bypassed in the current
-   `--disable-gpu` launch configuration)
-3. A **self-compiled `steamwebhelper` wrapper** that renames the Valve
+```
+macOS Tahoe 26.4 (arm64)
+ └── Rosetta 2 (x86_64 → arm64)
+      └── Wine 11.0 stable (Homebrew cask)
+           ├── Steam.exe
+           │    └── steamwebhelper.exe  (replaced by our C wrapper)
+           │         └── steamwebhelper_real.exe --disable-gpu --single-process
+           │              → Chromium CPU raster; UI renders
+           └── MonsterFarm.exe (Unity 6000, 32-bit)
+                └── D3D11 → DXMT → Metal
+```
+
+1. **Wine 11.0 stable** (Homebrew cask, `com.apple.quarantine` stripped)
+2. **DXMT v0.74** staged into both 64-bit and 32-bit Wine slots
+   (`lib/wine/x86_64-windows/` + `lib/wine/i386-windows/` +
+   `system32` + `syswow64`). 32-bit is required for Unity games that
+   ship as 32-bit Windows binaries.
+3. **Self-compiled `steamwebhelper` wrapper** that renames the Valve
    binary to `steamwebhelper_real.exe` and prepends
    `--disable-gpu --single-process` to every invocation. This
    collapses renderer / utility / gpu-process back into the browser
@@ -39,21 +62,32 @@ The working combination is:
    - DXMT Issue #141 (no cross-process D3D11 swapchain)
    - Wine's flaky winsock path inside Chromium's out-of-process
      NetworkService
-4. **`-noverifyfiles -no-cef-sandbox`** passed to `Steam.exe` so the
-   wrapper is not checksum-swapped back to Valve's binary at boot
-5. **Japanese font substitution** registry (`Replacements` under
-   `HKCU\Software\Wine\Fonts\`) so logical Windows font names resolve
-   to Hiragino Sans GB instead of Liberation Sans
+4. **`-noverifyfiles -no-cef-sandbox -cef-single-process`** passed to
+   `Steam.exe` so the wrapper is not checksum-swapped back to Valve's
+   binary at boot.
+5. **`WINEDLLOVERRIDES`** chains the pieces above:
+   `dxgi,d3d11,d3d10core=n,b` (DXMT native for games)
+   `bcrypt=b;ncrypt=b` (Wine builtin to avoid BoringSSL conflicts)
+   `gameoverlayrenderer,gameoverlayrenderer64=d`
+   (hard-disable Steam's overlay DLL injection; otherwise it hooks
+   Unity's D3D11 and deadlocks `GfxDevice: creating device client`).
+6. **Japanese font substitution** registry (`Replacements` under
+   `HKCU\Software\Wine\Fonts\`) maps `MS Shell Dlg`, `MS UI Gothic`,
+   `Tahoma`, `Segoe UI`, … to Hiragino Sans GB.
+7. **`RetinaMode=n`** for the Wine Mac driver is registered but does
+   not appear to be honoured by Unity 6000's resolution probe (the
+   window still opens at raw-pixel 3840x2160 and ignores
+   `-screen-width`).
 
-## Known limits at v0.1
+## Known limits at v0.2
 
-- `--disable-gpu` is a software-raster fallback. The DXMT pieces are
-  in place for the day DXMT ships cross-process swapchain support,
-  but the current launch configuration does not exercise them.
-- Heavy 3D titles will not be smooth through Wine's CPU composite;
-  this is intended for 2D / idle titles like 幻獣大農場.
-- `scripts/05-fix-ssl.sh` offers `INSTALL_COREFONTS=1` as an opt-in,
-  but it is not required for Japanese UI to render in v0.1.
+- The `--disable-gpu` setting applies to Chromium (Steam UI) only.
+  Games still go through DXMT for D3D11 translation and therefore
+  inherit whatever bugs DXMT has under macOS Tahoe + Wine 11.
+- Heavy 3D titles are unlikely to work well on the CPU fallback
+  Chromium path anyway; the goal here is 2D / idle titles.
+- `scripts/05-fix-ssl.sh` offers `INSTALL_COREFONTS=1` as an opt-in;
+  not required for Japanese UI.
 
 ## Why this project exists
 

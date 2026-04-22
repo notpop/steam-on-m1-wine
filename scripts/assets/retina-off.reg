@@ -1,0 +1,16 @@
+REGEDIT4
+
+; Disable Wine's Retina / HiDPI reporting.
+;
+; By default Wine's macOS driver reports the physical pixel resolution
+; of a Retina display (e.g. 3840x2160 on a 13" M1) as the desktop
+; resolution. Unity 6000 trusts that number and tries to open a
+; swapchain of that size. On DXMT that swapchain is created but the
+; frames are never presented back to the CAMetalLayer, so the Wine
+; window shows through as transparent.
+;
+; Setting RetinaMode to "n" makes the Mac driver report the logical
+; (1x) resolution (e.g. 1920x1200), which Unity can satisfy.
+
+[HKEY_CURRENT_USER\Software\Wine\Mac Driver]
+"RetinaMode"="n"

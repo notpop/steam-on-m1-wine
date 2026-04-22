@@ -106,14 +106,30 @@ fi
 export WINEPREFIX
 export WINEDEBUG
 
-# DLL overrides.
+# DLL overrides — hybrid configuration.
 #
-# The DXMT entries (`dxgi,d3d11,d3d10core=n,b`) were needed only while
-# the wrapper asked Chromium to stay GPU-accelerated. In the Step 2
-# fallback path the wrapper tells Chromium `--disable-gpu`, so d3d11
-# is never called and forcing DXMT's native DLLs only adds noise.
-# We leave `bcrypt=b` for BoringSSL hygiene.
-export WINEDLLOVERRIDES="bcrypt=b;ncrypt=b"
+#   dxgi,d3d11,d3d10core=n,b
+#     Keep DXMT in the override chain for *games*. Chromium's CEF
+#     browser gets its own `--disable-gpu` (passed through the
+#     steamwebhelper wrapper) so CEF never creates a D3D11 device
+#     and DXMT never fires on its codepath. But Unreal / Unity
+#     titles and anything else that calls CreateDevice directly
+#     still needs DXMT to translate D3D11 to Metal — otherwise
+#     those games die with "Failed to initialize graphics /
+#     DirectX 11" at launch.
+#
+#   bcrypt=b;ncrypt=b
+#     Force Wine's builtin BCrypt/NCrypt so Wine 11.0's stubs do
+#     not collide with Chromium BoringSSL on Apple Silicon.
+#
+#   gameoverlayrenderer,gameoverlayrenderer64=d
+#     Hard-disable Steam's in-game overlay DLLs. The overlay checkbox
+#     in the game properties only stops the UI; the DLL still gets
+#     injected into child processes and hooks D3D11. On Wine/DXMT
+#     that hook makes the target game deadlock in CreateDevice before
+#     Unity's `[Physics::Module]` log line. Turning the DLL into a
+#     disabled override stops Wine from loading it at all.
+export WINEDLLOVERRIDES="dxgi,d3d11,d3d10core=n,b;bcrypt=b;ncrypt=b;gameoverlayrenderer,gameoverlayrenderer64=d"
 
 # Steam flag set, validated on this hardware:
 #   -no-cef-sandbox       Chromium sandbox relies on Windows integrity
