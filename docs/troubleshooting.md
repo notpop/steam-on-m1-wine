@@ -2,6 +2,97 @@
 
 Symptoms are listed with their most likely cause and the ordered fix.
 
+## A Unity game process runs but its window is transparent (you see the desktop through it)
+
+**Symptom.** The game appears in `Dock`, `Cmd-Tab` lists it, the macOS
+window manager reports a window with the right name, but the window is
+visually empty and shows whatever is underneath. `Player.log` stops
+around `Input initialized` without a crash; the process sits at
+100% CPU (busy rendering → submitting frames).
+
+**Diagnosis.** The game submitted a swapchain to DXMT's
+`IDXGISwapChain::Present()` and DXMT in turn asked Metal's
+`CAMetalLayer` for a drawable — but on macOS Tahoe 26 the frames
+never land in the on-screen layer. This is a DXMT upstream problem,
+not a configuration error in this repo. Known related discussion:
+<https://github.com/3Shain/dxmt/issues/141>.
+
+**Current status.** Not fixed in DXMT v0.74. Try the nightly build
+from `https://github.com/3Shain/dxmt/actions` (each green workflow
+run publishes an artifact with the latest DLLs). Install manually
+by unpacking the artifact over `scripts/04-install-dxmt.sh`'s
+target paths.
+
+## Unity game opens a 4K / Retina-sized window that extends off-screen
+
+**Symptom.** The window registers at `3840x2160` (or the raw pixel
+size of a Retina display) even though you passed
+`-screen-width 800 -screen-height 600`. Only the top-left patch of
+the game is visible.
+
+**Diagnosis.** Wine's `winemac.drv` reports the physical Retina
+resolution as the desktop size. Unity 6000 trusts that number at
+launch and ignores `-screen-width` / `-screen-height` for the first
+run.
+
+**Fixes, in order.**
+1. Quit the game. The resolution you pass on the Steam launch line is
+   still persisted to
+   `HKCU\Software\<vendor>\<title>\Screenmanager Resolution*`, so a
+   second launch typically honours 800x600 / 1280x800.
+2. For a persistent fix, import `scripts/assets/retina-off.reg`
+   (sets `HKCU\Software\Wine\Mac Driver\RetinaMode=n`). This makes
+   Wine advertise the logical 1x resolution. Some Unity builds still
+   ignore the 1x number; in that case the only robust answer is a
+   windowed launch option like `-screen-width 1024 -screen-height 768`
+   combined with an initial quit-and-relaunch as in step 1.
+
+## "Failed to initialize graphics / DirectX 11" at game launch
+
+**Cause.** DXMT's 32-bit DLLs were not installed, so Wine's builtin
+`syswow64\d3d11.dll` (a ~400 KB stub) handled the `D3D11CreateDevice`
+call and failed. Typical for Unity titles shipped as 32-bit Windows
+binaries (幻獣大農場, older Unity games).
+
+**Fix.** Re-run `scripts/04-install-dxmt.sh`. Versions of this script
+from before the v0.2 tag only populated `lib/wine/x86_64-windows/`;
+the current version also copies the `i386-windows/*.dll` pieces into
+Wine and drops `winemetal.dll` into the prefix's `syswow64`.
+
+## Game hangs at `GfxDevice: creating device client` with CPU at 100%
+
+**Cause.** Steam's `GameOverlayRenderer.dll` was injected into the
+child game process and hooked `D3D11CreateDeviceAndSwapChain`.
+Unchecking the in-game overlay box in Steam's game properties is
+**not** sufficient — the DLL is still mapped.
+
+**Fix.** Ensure `launch-steam.sh` exports
+`gameoverlayrenderer,gameoverlayrenderer64=d` inside
+`WINEDLLOVERRIDES`. This makes Wine refuse to load the overlay DLL
+at all, regardless of Steam's own setting.
+
+## The Wine virtual desktop window freezes the entire Wine session
+
+**Cause.** All Wine windows are forced into a single container via
+`HKCU\Software\Wine\Explorer\Desktop=Default`. When one Windows
+program inside that container hangs the whole container becomes
+unresponsive, including Steam and every game.
+
+**Fix.**
+1. Kill everything:
+   `pkill -9 -f 'steam\.exe|steamwebhelper|wineserver|wine64-preloader|explorer\.exe'`
+2. Remove the Desktop key:
+   `wine reg delete 'HKCU\Software\Wine\Explorer' /v Desktop /f`
+3. Run `wineserver -k` so Wine flushes the change.
+4. Relaunch Steam normally. Each Wine program now gets its own
+   independent macOS window and one hang can no longer take the
+   others down.
+
+We currently recommend running **without** the virtual desktop for
+everyday use; `scripts/assets/virtual-desktop.reg` is kept in the
+repo as opt-in documentation for the rare case where a game insists
+on an exclusive fullscreen and you need the container to swallow it.
+
 ## Steam launches but stays stuck with a black window
 
 **Cause.** DXMT is not installed, or its DLLs are not being picked up.
