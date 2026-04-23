@@ -1,5 +1,5 @@
 # 3Shain wine v8.16-3shain winemac.so symbol list
-# file: /Users/notpop/dev/dxmt/toolchains/wine/lib/wine/x86_64-unix/winemac.so
+# file: <dxmt-src>/toolchains/wine/lib/wine/x86_64-unix/winemac.so
 # size: 588752 bytes
 # md5 : 0e96348fa9bf8bfd6ec86ccad7f415a5
 # nm -g

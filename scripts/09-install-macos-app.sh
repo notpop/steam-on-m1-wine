@@ -44,7 +44,7 @@ cat > "$APP_PATH/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key>
     <string>launcher</string>
     <key>CFBundleIdentifier</key>
-    <string>com.notpop.steam-on-m1-wine</string>
+    <string>com.github.notpop.steam-on-m1-wine</string>
     <key>CFBundleName</key>
     <string>Steam on M1 Wine</string>
     <key>CFBundleDisplayName</key>
