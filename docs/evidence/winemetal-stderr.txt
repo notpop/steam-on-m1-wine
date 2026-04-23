@@ -1,0 +1,3 @@
+[dxmt/winemetal] CreateMetalViewFromHWND: hwnd=0x90190 macdrv_functions=0x0 get_win_data=0x0 release_win_data=0x0 create_metal_view=0x0 get_metal_layer=0x0
+[dxmt/winemetal] CreateMetalViewFromHWND: one of the macdrv function pointers is NULL, silently returning empty view/layer
+err:   Failed to create metal view, it seems like your Wine has no exported symbols needed by DXMT.

@@ -18,7 +18,10 @@ require_wine_installed
 require_prefix_initialised
 
 LOG_DIR="${DXMT_LOG_PATH:-/tmp/dxmt-logs}"
-LEVEL="${DXMT_LOG_LEVEL:-3}"
+# DXMT's Logger parses this as a word (none|error|warn|info|debug|trace).
+# `debug` is what we want — `trace` generates more noise but can be set
+# explicitly if needed.
+LEVEL="${DXMT_LOG_LEVEL:-debug}"
 mkdir -p "$LOG_DIR"
 # Start each run clean so we do not re-read old output.
 rm -f "$LOG_DIR"/*.log
@@ -27,5 +30,9 @@ log_step "Launching Steam with DXMT_LOG_LEVEL=$LEVEL DXMT_LOG_PATH=$LOG_DIR"
 
 export DXMT_LOG_LEVEL="$LEVEL"
 export DXMT_LOG_PATH="$LOG_DIR"
+
+# If the user built the `debug/present-path-tracing` fork of DXMT, the
+# winemetal unixlib prints extra stderr when DXMT_DEBUG_METAL_VIEW is set.
+export DXMT_DEBUG_METAL_VIEW="${DXMT_DEBUG_METAL_VIEW:-1}"
 
 exec "$REPO_ROOT/scripts/launch-steam.sh" --detach

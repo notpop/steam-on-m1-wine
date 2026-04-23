@@ -44,6 +44,13 @@ DXMT_SRC="${DXMT_SRC:-$HOME/dev/dxmt}"
 LLVM_PREFIX="${LLVM_PREFIX:-$DXMT_SRC/toolchains/llvm}"
 WINE_TOOLCHAIN="${WINE_TOOLCHAIN:-$DXMT_SRC/toolchains/wine}"
 
+# DXMT's meson.build is not compatible with meson 1.11+ yet:
+# `src/airconv/darwin/meson.build:9: Tried to form an absolute path to a
+# dir in the source tree.` Pin to 1.10.x, which is what CI uses.
+# Export MESON to override (e.g. a user pip install at
+# ~/Library/Python/3.14/bin/meson).
+MESON="${MESON:-/opt/homebrew/bin/meson}"
+
 WINE_LIB_UNIX="$WINE_APP/Contents/Resources/wine/lib/wine/x86_64-unix"
 WINE_LIB_WIN64="$WINE_APP/Contents/Resources/wine/lib/wine/x86_64-windows"
 WINE_LIB_WIN32="$WINE_APP/Contents/Resources/wine/lib/wine/i386-windows"
@@ -65,28 +72,37 @@ cd "$DXMT_SRC"
 log_info "git submodule update"
 git submodule update --init --recursive >/dev/null
 
+# Meson refuses absolute include_directories() pointing inside the
+# source tree. DXMT's own src/airconv/darwin/meson.build takes advantage
+# of that: if `native_llvm_path` starts with "/" it calls
+# include_directories() directly, otherwise it prepends "../../.." first.
+# CI passes relative paths ("toolchains/llvm") so the second branch is
+# the one that actually works. Convert our absolute paths here.
+llvm_rel=$(python3 -c "import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))" "$LLVM_PREFIX" "$DXMT_SRC")
+wine_rel=$(python3 -c "import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))" "$WINE_TOOLCHAIN" "$DXMT_SRC")
+
 # -- 64-bit build --
 if [[ ! -d build ]]; then
     log_info "meson setup build (64-bit)"
-    arch -arm64 /opt/homebrew/bin/meson setup \
+    arch -arm64 "$MESON" setup \
         --cross-file build-win64.txt \
-        -Dnative_llvm_path="$LLVM_PREFIX" \
-        -Dwine_install_path="$WINE_TOOLCHAIN" \
+        -Dnative_llvm_path="$llvm_rel" \
+        -Dwine_install_path="$wine_rel" \
         build --buildtype release
 fi
 log_info "meson compile build (64-bit)"
-arch -arm64 /opt/homebrew/bin/meson compile -C build
+arch -arm64 "$MESON" compile -C build
 
 # -- 32-bit build --
 if [[ ! -d build32 ]]; then
     log_info "meson setup build32 (32-bit)"
-    arch -arm64 /opt/homebrew/bin/meson setup \
+    arch -arm64 "$MESON" setup \
         --cross-file build-win32.txt \
-        -Dwine_install_path="$WINE_TOOLCHAIN" \
+        -Dwine_install_path="$wine_rel" \
         build32 --buildtype release
 fi
 log_info "meson compile build32 (32-bit)"
-arch -arm64 /opt/homebrew/bin/meson compile -C build32
+arch -arm64 "$MESON" compile -C build32
 
 # -- Stage the outputs over the Wine bundle + prefix --
 install_file() {
