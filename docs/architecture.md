@@ -1,60 +1,112 @@
 # Architecture
 
-`steam-on-m1-wine` is a small chain of shell scripts that layer three
-pieces of software on top of Homebrew-packaged Wine:
+`steam-on-m1-wine` is a chain of shell scripts that assemble **four**
+pieces of software into a working Steam + D3D11 stack on Apple Silicon:
 
-1. **Wine 11 (stable)** — the Windows API implementation
-2. **DXMT** — a Metal-based Direct3D 11 / 10 translation layer
-3. A **wrapper** for `steamwebhelper.exe` that forces CEF's GPU
-   process to run in-process
+1. **Wine 11** (Gcenx Homebrew Cask) -- the Windows API host
+2. **Wine visibility patch** -- `winemac.so` rebuilt with
+   `-fvisibility=default` so `macdrv_*` symbols are `dlsym`-reachable
+3. **DXMT fork** (`notpop/dxmt@debug/present-path-tracing`) -- Metal
+   bridge with a rewritten `_CreateMetalViewFromHWND`
+4. **steamwebhelper wrapper** -- thin PE shim that forces CEF flags and
+   redirects to `steamwebhelper_real.exe`
 
-This document explains why each layer is there and what it fixes.
+At runtime, all four are unified inside a **Wine virtual desktop**
+(`explorer.exe /desktop=steam-on-m1-wine,WxH`) so CEF and game windows
+share a single `CAMetalLayer` surface hierarchy.
+
+This document explains why each layer is required and where it
+intercepts the stack. For low-level diagnosis traces see
+`docs/dxmt-diagnosis.md`.
 
 ## The failure chain without these fixes
 
 A stock Homebrew `wine-stable` prefix with Steam installed exhibits
-this cascade on Apple Silicon:
+a three-layer bug cascade on Apple Silicon / Wine 11:
 
 ```
 Steam launches
-    ├── Initial bootstrapper updates self-package ................ OK
-    ├── steam.exe starts steamwebhelper.exe  ..................... OK
-    ├── CEF (Chromium 126) creates a D3D11 swapchain ............. FAIL
-    │       └── ANGLE falls back to wined3d's OpenGL path
-    │           └── wined3d can't satisfy "GLES 3.0 >= required(2.0)"
-    │               └── UI renders as a black window
-    └── Chromium tries HTTPS to steam CDNs ........................ FAIL
-            └── ssl_client_socket_impl handshake -100 / -107
-                └── downstream of the GPU / sandboxing above
+    ├── steamwebhelper.exe starts Chromium 126 (CEF) .......... OK
+    ├── CEF requests a D3D11 swap-chain ........................ FAIL (1)
+    │       Wine macdrv symbols hidden by -fvisibility=hidden
+    │       => DXMT cannot dlsym macdrv_view_create_metal_view
+    │          => swap-chain creation returns E_FAIL
+    │             => CEF UI renders as a permanent black window
+    │
+    ├── DXMT calls macdrv_view_create_metal_view ............... FAIL (2)
+    │       Wine 11 struct macdrv_win_data ABI drift:
+    │       expected field offset for the CALayer* is wrong.
+    │       GDI present path leaves the pointer NULL at the
+    │       moment DXMT tries to attach a Metal view to it.
+    │
+    └── macdrv_view_create_metal_view / OnMainThread ........... FAIL (3)
+            macdrv internals dispatch via OnMainThread().
+            If the caller already holds that trampoline the
+            second dispatch deadlocks. DXMT's call-site in
+            the swap-chain creation path hits this re-entrancy.
 ```
 
-The UI never paints. Even if the user could click Login they couldn't,
-because the Chromium view is never drawn.
+Each failure is independent; fixing only one still breaks the stack.
+Full reproduction and fix evidence is in `docs/dxmt-diagnosis.md`
+Phase D.
 
-## What each script corrects
+Additionally, Chromium's network utility process inherits Wine's
+broken winsock SSL path. `--enable-features=NetworkServiceInProcess`
+is not honored by CEF 126, so the only working fix is `--single-process`
+(which also satisfies the GPU process constraint).
 
-### `01-install-wine.sh` — Wine + winetricks + Gatekeeper
+## Layered diagram
 
-Installs `wine-stable` via Homebrew Cask, then removes
+```
+macOS Tahoe 26 (Apple Silicon, arm64 + Rosetta 2)
+└── Wine 11.0 (x86_64, Gcenx Homebrew cask)
+    └── winemac.so  (self-built, -fvisibility=default, swapped in)
+        └── explorer.exe /desktop=steam-on-m1-wine,WxH
+            ├── Steam.exe
+            │   └── steamwebhelper.exe  (our wrapper)
+            │       └── steamwebhelper_real.exe
+            │                --disable-gpu --single-process
+            │           └── Chromium 126 (CEF)
+            └── <Game>.exe  (Unity / Unreal / D3D11)
+                └── DXMT (fork v0.6)
+                    ├── d3d11.dll / d3d10core.dll / dxgi.dll
+                    └── winemetal.so  <-- Metal-side bridge
+                        └── Metal / CAMetalLayer
+```
+
+## What each script does
+
+### `00-prereqs.sh` -- environment check
+
+Verifies Rosetta 2 is installed, Homebrew is present, and Xcode
+Command Line Tools are available. Aborts with a clear message if any
+are missing; subsequent scripts assume this baseline.
+
+### `01-install-wine.sh` -- Wine + Gatekeeper
+
+Installs `wine-stable` via the Gcenx Homebrew Cask, then removes
 `com.apple.quarantine` from the bundle. Without that strip, macOS
 Tahoe's unsigned-binary policy SIGKILLs `wine` on first exec.
 
-### `02-setup-prefix.sh` — prefix and fonts
+### `02-setup-prefix.sh` -- prefix and fonts
 
 Creates the Wine prefix (default `~/.wine-steam`), then copies Japanese
 system fonts from `/System/Library/` and `/System/Library/AssetsV2/`
 so Steam UI can render Japanese glyphs. The fonts belong to the user
 already; this is a user-to-user copy.
 
-### `03-install-steam.sh` — Steam installer
+### `03-install-steam.sh` -- Steam installer
 
 Downloads `SteamSetup.exe` from the Valve CDN, verifies it is a valid
 PE executable, runs it silently (`/S`), and asserts `Steam.exe` ends up
 in the prefix. No Steam code is committed to this repository.
 
-### `04-install-dxmt.sh` — D3D11 → Metal
+### `04-install-dxmt.sh` -- DXMT v0.74 fallback stage
 
-Places DXMT's builtin build files where Wine expects them:
+Places the upstream DXMT v0.74 release into the Wine prefix so that
+Steam's UI layer comes up even before the fork is built. The fork
+(script `07`) overwrites these files. This stage ensures the setup
+pipeline reaches a testable state early.
 
 | File                | Destination                                                      |
 | ------------------- | ----------------------------------------------------------------- |
@@ -64,66 +116,94 @@ Places DXMT's builtin build files where Wine expects them:
 | `dxgi.dll`          | `<wine>/lib/wine/x86_64-windows/`                                 |
 | `d3d10core.dll`     | `<wine>/lib/wine/x86_64-windows/`                                 |
 
-Writing into the Wine bundle means a future Homebrew Cask upgrade will
-clobber these files. That is intentional: rerun `04-install-dxmt.sh`
-after every Wine upgrade.
+### `05-fix-ssl.sh` -- CA bundle and corefonts
 
-### `05-fix-ssl.sh` — prefix CA bundle + corefonts
+Places the system CA bundle at `C:\windows\cacert.pem` and installs
+Microsoft core fonts. Without corefonts some CEF error pages refuse to
+lay out, which presents as another blank screen.
 
-Not a direct TLS fix (Chromium uses its own BoringSSL), but puts the
-system's CA bundle in `C:\windows\cacert.pem` and installs Microsoft
-core fonts via `winetricks`. Without corefonts some Chromium error
-pages refuse to lay out, which reads as another blank screen.
+### `06-install-wrapper.sh` -- steamwebhelper wrapper
 
-### `06-install-wrapper.sh` — steamwebhelper wrapper
-
-Builds `wrapper/steamwebhelper.exe` from C via Homebrew's
+Builds `wrapper/steamwebhelper.exe` from C using Homebrew's
 `x86_64-w64-mingw32-gcc`, renames Valve's binary to
 `steamwebhelper_real.exe`, and drops the wrapper in its place. The
-wrapper prepends `--in-process-gpu` to every invocation so Chromium
-runs its GPU code inside the main browser process. DXMT does not
-support CEF's default out-of-process swapchain
-(see [DXMT Issue #141](https://github.com/3Shain/dxmt/issues/141)).
+wrapper prepends `--disable-gpu --single-process` to every invocation:
 
-### `launch-steam.sh` — runtime
+- `--disable-gpu` prevents CEF from creating its own D3D11 context
+  outside the DXMT-managed path, avoiding the black-window regression
+  seen with Chromium 126 on out-of-process GPU mode.
+- `--single-process` collapses Chromium's network utility process into
+  the main process, side-stepping the Wine winsock SSL bug.
+  `--enable-features=NetworkServiceInProcess` was tested and confirmed
+  not honored by CEF 126.
 
-Kills previous sessions, purges Chromium's SingletonLock (a classic
-Wine-crash leftover that reduces the next launch to `--silent`),
-exports `WINEDLLOVERRIDES="dxgi,d3d11,d3d10core=n,b"`, and starts
-Steam with the CEF flag set that has been validated on this hardware.
+### `07-build-dxmt-fork.sh` -- DXMT fork build (v0.6, new)
 
-## Layered diagram
+Clones `github.com/notpop/dxmt@debug/present-path-tracing`, downloads
+the 3Shain Wine toolchain, and builds DXMT with LLVM 15 targeting
+x86_64. The resulting `winemetal.so` and DLLs overwrite the v0.74
+fallback staged by script `04`. Build details and LLVM version
+requirements are documented in `docs/building-for-games.md`.
 
-```
- ┌──────────────────────────────────────────────────────────┐
- │ Steam.exe (Windows)                                      │
- │   └── steamwebhelper.exe  ← our wrapper                  │
- │       └── steamwebhelper_real.exe --in-process-gpu ...   │
- │           └── Chromium 126 renderer                      │
- │               └── D3D11 calls                            │
- └─────────────────────────┬────────────────────────────────┘
-                           │
-                   ┌───────▼───────┐
-                   │  DXMT (PE+so) │   ← native DLLs in system32
-                   │  d3d11/dxgi   │     winemetal.so in wine/
-                   └───────┬───────┘
-                           │
-                   ┌───────▼───────┐
-                   │ Wine 11.0     │   ← /Applications/Wine Stable.app
-                   │ (x86_64)      │     under Rosetta 2
-                   └───────┬───────┘
-                           │
-                   ┌───────▼───────┐
-                   │ macOS Tahoe   │   ← M1, arm64 + Rosetta 2
-                   └───────────────┘
-```
+### `08-patch-wine-visibility.sh` -- Wine visibility patch (v0.6, new)
 
-## Why this project pins DXMT v0.74
+Rebuilds Wine 11's macOS driver (`dlls/winemac.drv`) with
+`-fvisibility=default` so that `macdrv_*` C symbols are exported and
+`dlsym`-reachable at runtime. Only `winemac.so` is swapped; the rest
+of the Wine bundle is left untouched. The original Gcenx-provided
+`winemac.so` is retained as a `.gcenx-backup` alongside it so a Cask
+upgrade can restore the old file without rerunning the full script.
 
-DXMT only publishes "builtin" release archives. The Wiki's "Installation
-guide for geeks" says Wine ≥ 8 with `winemac.drv` symbols exposed is
-sufficient. Gcenx's Homebrew `wine-stable` 11.0 is such a build, so
-v0.74 tarball drops in cleanly. Future DXMT tags are likely to work
-similarly, but bumping `DXMT_TAG` in `scripts/04-install-dxmt.sh`
-should be a conscious, tested change — update the pinned SHA256 at
-the same time.
+Without this patch DXMT cannot locate `macdrv_view_create_metal_view`
+at link time and swap-chain creation fails immediately (failure 1 in
+the cascade above).
+
+### `09-install-macos-app.sh` -- macOS app bundle
+
+Generates `~/Applications/Steam on M1 Wine.app`. The app is a thin
+shell-script bundle that calls `launch-steam.sh`; it carries a custom
+icon and a proper `CFBundleIdentifier` so macOS Mission Control treats
+it as a first-class application.
+
+### `10-add-to-dock.sh` -- Dock registration (opt-in)
+
+Adds the app bundle to the user's Dock via `defaults write`. This
+script is never called automatically; it is an explicit opt-in step.
+
+### `launch-steam.sh` -- runtime launcher
+
+Orchestrates a clean, reproducible Steam session:
+
+1. Kill any running Steam / Wine session.
+2. Delete `SingletonLock` from the Steam userdata directory (a common
+   Wine-crash leftover that degrades the next launch to `--silent`).
+3. Verify wrapper integrity (confirms `steamwebhelper.exe` is ours,
+   not a Valve update that silently overwrote it).
+4. Scrub `STEAM_COMPAT_FLAGS` for `DISABLEDXMAXIMIZEDWINDOWEDMODE`,
+   which conflicts with the virtual desktop geometry.
+5. Set Wine registry key
+   `HKCU\Software\Wine\Mac Driver\AllowImmovableWindows` to `n` so
+   the virtual desktop window cannot be pinned behind other macOS
+   windows.
+6. Launch Steam inside `explorer.exe /desktop=steam-on-m1-wine,WxH`
+   where `WxH` is the current display resolution, keeping all Wine
+   windows contained in one managed surface.
+
+## Why we maintain a fork
+
+Upstream DXMT v0.74 is compatible with older Wine but breaks on
+Wine 11 for two reasons:
+
+- **ABI drift**: `struct macdrv_win_data` field layout changed between
+  the Wine version DXMT was developed against and Wine 11. The CALayer
+  pointer DXMT reads is at the wrong offset, and the GDI present path
+  leaves it NULL at swap-chain creation time anyway (failure 2).
+- **OnMainThread re-entrancy**: `macdrv_view_create_metal_view`
+  internally dispatches via `OnMainThread()`. DXMT's call-site wraps
+  the call in its own `OnMainThread()` trampoline, causing a deadlock
+  on the second nested dispatch (failure 3).
+
+The fork (`notpop/dxmt@debug/present-path-tracing`) addresses both by
+rewriting `_CreateMetalViewFromHWND` (~150 line diff). A PR to the
+upstream `3Shain/dxmt` is planned; a draft issue is at
+`docs/upstream-issue-draft.md`.
