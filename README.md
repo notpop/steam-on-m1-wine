@@ -18,22 +18,33 @@ cd steam-on-m1-wine
 bash install.sh
 ```
 
-That installs Wine 11, sets up a Steam-only prefix, fetches the real
-Steam installer from Valve's CDN, builds & deploys the
-`steamwebhelper` wrapper, drops a macOS **Steam on M1 Wine.app** into
-`~/Applications`. Launch with the Dock icon (or the `.app`), log in
-with your Valve account. **The Steam UI is usable at this point.**
+That runs the full stack end-to-end: Wine 11 install + Steam-only
+prefix + real Steam client from Valve's CDN + `steamwebhelper`
+wrapper + **DXMT fork build** + **Wine 11 rebuild with
+`-fvisibility=default`** + macOS **Steam on M1 Wine.app** into
+`~/Applications`. Budget **~1 hour** on first run — the LLVM 15
+x86_64 self-build and the Wine compile are the slow parts. Every
+step is idempotent; a second run finishes in seconds.
 
-To also run D3D11 games (Unity / Unreal / Monogame titles), you need
-an extra DXMT fork build and a Wine rebuild with
-`-fvisibility=default`. Both take ~30 min each. Full step-by-step
-instructions in [`docs/building-for-games.md`](docs/building-for-games.md).
+When it's done, launch Steam with the Dock icon (or the `.app`), log
+in with your Valve account, and D3D11 games run through DXMT.
 
-Optional — pin the app to the Dock (idempotent):
+Pin the app to the Dock (idempotent, optional):
 
 ```bash
 bash scripts/10-add-to-dock.sh
 ```
+
+In a hurry and just want the Steam UI (no D3D11 games) in ~10 min?
+
+```bash
+bash install.sh --minimal
+```
+
+You can always re-run `bash install.sh` later to add the D3D11 path
+on top of an existing minimal install. See
+[`docs/building-for-games.md`](docs/building-for-games.md) for what
+the full mode does step by step.
 
 ---
 
@@ -149,12 +160,17 @@ Options` and paste:
 | Japanese system fonts | `/System/Library/` (user-owned) | Steam UI glyphs |
 | Steam client | `cdn.cloudflare.steamstatic.com` | Installed on demand |
 | steamwebhelper wrapper | Built from `wrapper/` (mingw-w64) | CEF flag injector |
-| `.app` bundle | Generated locally in `~/Applications` | Dock launcher |
 | DXMT v0.74 | Official GitHub Release | D3D11 → Metal (fallback) |
+| DXMT fork (v0.6) | `github.com/notpop/dxmt@debug/present-path-tracing` | D3D11 → Metal (active, full mode) |
+| LLVM 15 (x86_64) | Self-built from `llvmorg-15.0.7` | DXMT shader compiler (full mode) |
+| 3Shain Wine toolchain | `github.com/3Shain/wine@v8.16-3shain` | Link-time inputs for DXMT (full mode) |
+| Wine 11.0 source | `gitlab.winehq.org/wine/wine@wine-11.0` | Rebuilt with `-fvisibility=default` (full mode) |
+| `.app` bundle | Generated locally in `~/Applications` | Dock launcher |
 
-D3D11 gaming additionally requires the v0.6 DXMT fork and a
-visibility-patched Wine build; see
-[`docs/building-for-games.md`](docs/building-for-games.md).
+`install.sh` fetches all of these live; nothing with licensing
+friction is redistributed through this repo. `install.sh --minimal`
+skips the bottom four (LLVM + Wine source + fork) and leaves you
+with a working Steam UI but transparent D3D11 game windows.
 
 Steam binaries and Windows DLLs are **never** redistributed through
 this repository — everything with licensing friction is fetched live
@@ -183,13 +199,15 @@ from the vendor the first time the corresponding script runs.
 │   ├── 04-install-dxmt.sh           # v0.74 fallback
 │   ├── 05-fix-ssl.sh
 │   ├── 06-install-wrapper.sh
+│   ├── 07-build-dxmt-fork.sh        # v0.6 DXMT fork (auto)
+│   ├── 08-patch-wine-visibility.sh  # Wine -fvisibility=default rebuild
 │   ├── 09-install-macos-app.sh      # Generate the Dock .app
 │   ├── 10-add-to-dock.sh            # Optional: pin to Dock
 │   ├── launch-steam.sh              # Manual launch
 │   ├── lib/common.sh                # Shared helpers
 │   ├── assets/                      # .reg fragments
 │   └── experimental/
-│       ├── 07-build-dxmt-from-fork.sh   # v0.6 DXMT fork build
+│       ├── 07-build-dxmt-from-fork.sh   # Dev-mode of 07 (manual prereqs)
 │       ├── 04b-install-dxmt-nightly.sh
 │       ├── 04b-revert-to-dxmt-v0.74.sh
 │       └── run-with-dxmt-debug.sh

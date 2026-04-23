@@ -1,43 +1,30 @@
 #!/usr/bin/env bash
 #
-# install.sh — One-shot bootstrap for steam-on-m1-wine.
+# install.sh — End-to-end setup for steam-on-m1-wine.
 #
-# Idempotent end-to-end setup. Safe to re-run at any point; each step
-# short-circuits if its work has already been done.
+# Default mode (no arguments)
+# ---------------------------
+# Builds the full D3D11-gaming stack: Wine 11 + Steam + steamwebhelper
+# wrapper + DXMT fork build + Wine rebuild with -fvisibility=default
+# + macOS .app bundle. After this finishes the user can launch Steam,
+# log in, and run D3D11 games through DXMT. Takes ~1 hour on first
+# run (LLVM 15 x86_64 build + Wine 11 compile), seconds on re-runs.
 #
-# What it does (in order)
-# -----------------------
-#   1. 00-prereqs.sh         Verify Rosetta, Homebrew, Xcode CLT
-#   2. 01-install-wine.sh    brew install wine-stable + gstreamer
-#   3. 02-setup-prefix.sh    Initialise $WINEPREFIX + JP fonts
-#   4. 03-install-steam.sh   Fetch & install SteamSetup.exe
-#   5. 04-install-dxmt.sh    Stage DXMT v0.74 (still used as a fallback)
-#   6. 05-fix-ssl.sh         BCrypt / SSL workarounds
-#   7. 06-install-wrapper.sh Build + deploy the steamwebhelper wrapper
-#   8. 09-install-macos-app.sh  Drop "Steam on M1 Wine.app" into
-#                               ~/Applications for Dock pinning
+# --minimal
+# ---------
+# Stops after scripts/06. Steam UI works; D3D11 games don't. Useful
+# for testing the CEF side without waiting on the long builds. The
+# user can always run `bash install.sh` later to complete the stack.
 #
-# What it intentionally does NOT do
-# ---------------------------------
-#   - Does not pin the .app to the Dock. Mutating the Dock's plist
-#     without explicit consent is too invasive. The final step prints
-#     `open ~/Applications` so the user can drag the app in manually
-#     (or run `scripts/10-add-to-dock.sh` if they want it automated).
-#   - Does not rebuild the DXMT fork (v0.6 fix). The fork build needs
-#     extra toolchains (LLVM 15 cross-build, the 3Shain Wine tarball,
-#     meson 1.10) and takes tens of minutes. That is a separate,
-#     opt-in step: `scripts/experimental/07-build-dxmt-from-fork.sh`.
-#     Until we ship a prebuilt winemetal.so / DXMT fork artefact,
-#     anything beyond Steam UI requires running that script by hand.
-#
-# Usage
-# -----
-#   bash install.sh
+# Every step is idempotent; safe to re-run at any point.
 #
 # Env overrides (all optional)
 # ----------------------------
 #   WINEPREFIX         target prefix directory (default: ~/.wine-steam)
 #   INSTALL_APP_DIR    where Steam on M1 Wine.app lands (default: ~/Applications)
+#   DXMT_SRC           where the DXMT fork is cloned (default: ~/dev/dxmt)
+#   LLVM_PREFIX        where the x86_64 LLVM 15 lives (default: $DXMT_SRC/toolchains/llvm)
+#   WINE_BUILD_SRC     where Wine 11.0 source lives (default: ~/dev/wine-build/wine)
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -46,16 +33,34 @@ cd "$(dirname "$0")"
 source "scripts/lib/common.sh"
 require_macos_arm64
 
-log_step "steam-on-m1-wine installer"
+MODE="full"
+if [[ "${1:-}" == "--minimal" ]]; then
+    MODE="minimal"
+elif [[ -n "${1:-}" ]]; then
+    die "Unknown argument: $1 (use --minimal, or no arguments for full)"
+fi
+
+log_step "steam-on-m1-wine installer ($MODE mode)"
 log_info "Prefix            : $WINEPREFIX"
 log_info "App install dir   : ${INSTALL_APP_DIR:-$HOME/Applications}"
 log_info ""
-log_info "This will run scripts/00→06 + 09. Any step already completed"
-log_info "no-ops out. Total runtime ≈ 10–20 min on a fresh machine,"
-log_info "seconds on a re-run."
+if [[ "$MODE" == "full" ]]; then
+    log_info "Full mode runs scripts/00 through 09 in sequence. On a fresh"
+    log_info "machine that means ~1 hour total — mainly an LLVM 15"
+    log_info "self-build and a Wine 11 rebuild. Each step is idempotent,"
+    log_info "so re-running after a failure just picks up where it left"
+    log_info "off."
+    log_info ""
+    log_info "If you only need the Steam UI (no D3D11 games) and want to"
+    log_info "stop after a few minutes, run:  bash install.sh --minimal"
+else
+    log_info "Minimal mode runs scripts/00 through 06 + 09 only. The Steam"
+    log_info "UI will boot; D3D11 games will show transparent windows."
+    log_info "Re-run without --minimal to add the DXMT fork + Wine"
+    log_info "-fvisibility=default patch."
+fi
 
-# Run each step, surfacing its own coloured log lines.
-steps=(
+core_steps=(
     scripts/00-prereqs.sh
     scripts/01-install-wine.sh
     scripts/02-setup-prefix.sh
@@ -63,8 +68,20 @@ steps=(
     scripts/04-install-dxmt.sh
     scripts/05-fix-ssl.sh
     scripts/06-install-wrapper.sh
-    scripts/09-install-macos-app.sh
 )
+
+d3d11_steps=(
+    scripts/07-build-dxmt-fork.sh
+    scripts/08-patch-wine-visibility.sh
+)
+
+app_step=scripts/09-install-macos-app.sh
+
+if [[ "$MODE" == "full" ]]; then
+    steps=("${core_steps[@]}" "${d3d11_steps[@]}" "$app_step")
+else
+    steps=("${core_steps[@]}" "$app_step")
+fi
 
 for step in "${steps[@]}"; do
     log_step "$(basename "$step")"
@@ -77,7 +94,6 @@ APP_PATH="${INSTALL_APP_DIR:-$HOME/Applications}/$APP_NAME"
 log_step "Done"
 log_info ""
 log_info "Launch options:"
-log_info ""
 log_info "  • Double-click $APP_PATH"
 log_info "  • or run:  bash scripts/launch-steam.sh --detach"
 log_info ""
@@ -86,6 +102,11 @@ log_info "  • Run  open ${INSTALL_APP_DIR:-$HOME/Applications}"
 log_info "  • Drag '$APP_NAME' onto your Dock"
 log_info "  • Or run  bash scripts/10-add-to-dock.sh  (automated)"
 log_info ""
-log_info "For D3D11 games (not just Steam UI):"
-log_info "  • Follow  docs/building-for-games.md"
-log_info "    (DXMT fork build + Wine -fvisibility=default rebuild, ~1 hour)"
+if [[ "$MODE" == "minimal" ]]; then
+    log_info "You ran --minimal. D3D11 games will show transparent windows"
+    log_info "until you complete the stack:"
+    log_info "  bash install.sh         # picks up 07 + 08"
+    log_info ""
+fi
+log_info "Per-game Steam Launch Options (Unity titles):"
+log_info "  -force-d3d11-no-singlethreaded -screen-fullscreen 0"
