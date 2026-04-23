@@ -62,4 +62,53 @@ nightly に差し替えて同じ手順 (Steam → 幻獣大農場 → プレイ)
 
 - `scripts/experimental/04b-install-dxmt-nightly.sh` — gh CLI で master の最新 artifact を取得して DLL を差し替え。初回実行時は v0.74 を `vendor/dxmt-v074-backup/` に退避する
 - `scripts/experimental/04b-revert-to-dxmt-v0.74.sh` — 退避した v0.74 を戻す
-- `scripts/experimental/run-with-dxmt-debug.sh` — `DXMT_LOG_LEVEL=3 DXMT_LOG_PATH=/tmp/dxmt-logs` を設定して Steam を起動する。ゲームが落ちた後に `/tmp/dxmt-logs/<ProcessName>_d3d11.log` などが残る
+- `scripts/experimental/run-with-dxmt-debug.sh` — `DXMT_LOG_LEVEL=debug DXMT_LOG_PATH=/tmp/dxmt-logs` を設定して Steam を起動する。ゲームが落ちた後に `/tmp/dxmt-logs/<ProcessName>_d3d11.log` などが残る
+
+**Note on `DXMT_LOG_LEVEL`**: ソース (`src/util/log/log.hpp`) と `docs/DEVELOPMENT.md` が
+一致しており、値は **文字列**: `none` / `error` / `warn` / `info` / `debug` / `trace`。
+数値 (`3` など) を渡すと意図と違うレベルで処理される可能性があるので、必ず文字列で渡すこと。
+
+## 次フェーズ: fork して診断ログを注入する
+
+本実験のあと、upstream に PR が立っていないと判断して fork を切った:
+
+- **fork**: <https://github.com/notpop/dxmt>
+- **branch**: [`debug/present-path-tracing`](https://github.com/notpop/dxmt/tree/debug/present-path-tracing)
+- **commit**: `b8ebec5` "debug: trace swapchain Present() and macdrv Metal view handover"
+
+追加した trace は 3 ヶ所、すべて加算のみで挙動は変えない:
+
+| ファイル | 位置 | 目的 |
+| --- | --- | --- |
+| `src/winemetal/unix/winemetal_unix.c` | `_CreateMetalViewFromHWND` | dlsym したシンボル値と、成功時の `client_cocoa_view` / `macdrv_metal_view` / `macdrv_metal_layer` を `fprintf(stderr)` で出力。`DXMT_DEBUG_METAL_VIEW=1` で有効化 |
+| `src/d3d11/d3d11_swapchain.cpp` | `ApplyLayerProps` | `desc_.Width/Height × scale_factor` を DEBUG ログ (Retina 二重適用疑惑の検証) |
+| `src/d3d11/d3d11_swapchain.cpp` | `Present1` | 各呼び出しの `SyncInterval` / `PresentFlags` / `window_minimized` / `desc_.Width/Height` / `SwapEffect` / `HRESULT` を DEBUG ログ。`DXGI_STATUS_OCCLUDED` による早期 return を見落とさないため |
+
+### ビルド前提 (別日に実行)
+
+DXMT の `docs/DEVELOPMENT.md` が "not for beginners" と明記するほどの重い前提が必要:
+
+- **LLVM 15** (正確なメジャーバージョン指定、Homebrew の `llvm@15` で可)
+- **mingw-w64** (x86_64 + i686、Homebrew `mingw-w64` 既済)
+- **Wine 8+ のビルドディレクトリ** (Gcenx cask のバイナリには include が付属しないので、Wine 11 を `git clone && configure && make` で自前ビルドが必要。数時間コース)
+- **Xcode 16+**, Meson 1.3+, Ninja
+
+### ビルド後の差し替え (未実行メモ)
+
+1. `meson setup --cross-file build-win64.txt -Dnative_llvm_path=/opt/homebrew/opt/llvm@15 -Dwine_build_path=<wine-build-dir> build --buildtype release`
+2. `meson compile -C build`
+3. 32-bit 側も `build-win32.txt` で同様に
+4. 生成された `d3d11.dll`, `dxgi.dll`, `d3d10core.dll`, `winemetal.dll`, `winemetal.so` を `scripts/experimental/04b-install-dxmt-nightly.sh` と同じ配置先に手で差し替え
+5. `DXMT_DEBUG_METAL_VIEW=1 DXMT_LOG_LEVEL=debug DXMT_LOG_PATH=/tmp/dxmt-logs scripts/launch-steam.sh --detach`
+6. ゲームを起動し、`/tmp/dxmt-logs/MonsterFarm_d3d11.log` と macOS 側 stderr (`/var/folders/.../steam-on-m1-wine.log`) に吐かれた trace を読む
+
+### 期待される診断
+
+trace を見ると以下のどれが起きているかを切り分けられるはず:
+
+- `Present1` が呼ばれず、`ApplyLayerProps` 段階で `desc_.Width × scale` が異常値 → scale_factor 二重適用の検証
+- `Present1` は呼ばれているが `hr == DXGI_STATUS_OCCLUDED` で早期 return → Window minimized 誤判定
+- `CreateMetalViewFromHWND` の `client_cocoa_view` か `macdrv_metal_view` が NULL → Wine 11 の macdrv 側 regression
+- どの log も沈黙 → Unity が D3D11 ではなく別 API (Metal direct? OpenGL?) を叩きに行っている
+
+切り分けが付けば、upstream 3Shain/dxmt にも具体的な症状を添えて issue を立てられる。
