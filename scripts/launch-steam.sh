@@ -27,7 +27,7 @@ LOG_FILE="${STEAM_LAUNCH_LOG:-${TMPDIR:-/tmp}/steam-on-m1-wine.log}"
 
 # -- 1. Stop lingering processes ---------------------------------------------
 log_step "Stopping any running Steam / Wine processes"
-patterns='steam\.exe|steamwebhelper|steamservice|wineserver|wine64-preloader|winedevice'
+patterns='steam\.exe|steamwebhelper|steamservice|wineserver|wine64-preloader|winedevice|explorer\.exe'
 to_kill=$(pgrep -f "$patterns" || true)
 if [[ -n "$to_kill" ]]; then
     # shellcheck disable=SC2086 # intentional word-split: multiple PIDs
@@ -81,6 +81,82 @@ if [[ -f "$WRAPPER_BIN" ]]; then
     fi
 else
     log_warn "Compiled wrapper missing at $WRAPPER_BIN — run scripts/06-install-wrapper.sh"
+fi
+
+# -- 2c. Scrub the DISABLEDXMAXIMIZEDWINDOWEDMODE AppCompat token --------------
+# Steam tags most DirectX games it installs with this Windows compatibility
+# layer. On real Windows it tells DXGI to refuse "maximized windowed mode"
+# so the app goes exclusive-fullscreen. Wine's macdrv honours the hint
+# (indirectly) and routes the NSWindow into macOS's native fullscreen
+# space, which is what makes games seize the whole display and prevents
+# coexistence with other macOS windows even when we already opened the
+# Wine session inside a `/desktop=` virtual desktop. Strip the token so
+# Unity/D3D11 titles can stay windowed.
+USER_REG="$WINEPREFIX/user.reg"
+if [[ -f "$USER_REG" ]]; then
+    if grep -q 'DISABLEDXMAXIMIZEDWINDOWEDMODE' "$USER_REG"; then
+        python3 - "$USER_REG" <<'PYEOF'
+import re, sys
+path = sys.argv[1]
+with open(path, 'r', encoding='utf-8', errors='surrogateescape') as f:
+    data = f.read()
+# Value lines look like:
+#   "C:\\...\\MonsterFarm.exe"="~ DISABLEDXMAXIMIZEDWINDOWEDMODE"
+# Drop the token (and the leading "~ " if it is the only entry) while
+# leaving any other compat layers the user may genuinely want intact.
+pattern = re.compile(r'"([^"]+\.exe)"="([^"]*)"')
+changed = False
+def fix(m):
+    global changed
+    value = m.group(2)
+    if 'DISABLEDXMAXIMIZEDWINDOWEDMODE' not in value:
+        return m.group(0)
+    tokens = [t for t in value.split() if t and t != 'DISABLEDXMAXIMIZEDWINDOWEDMODE']
+    # The leading "~" is the AppCompat "USER" marker. Keep it only if
+    # other layers remain.
+    if tokens == ['~']:
+        new = ''
+    else:
+        new = ' '.join(tokens)
+    changed = True
+    return f'"{m.group(1)}"="{new}"'
+new = pattern.sub(fix, data)
+# If an .exe mapped to an empty value after the scrub, drop the line
+# entirely so we don't leave noise behind.
+new = re.sub(r'\n"[^"]+\.exe"=""\n', '\n', new)
+if changed:
+    with open(path, 'w', encoding='utf-8', errors='surrogateescape') as f:
+        f.write(new)
+PYEOF
+        log_ok "Stripped DISABLEDXMAXIMIZEDWINDOWEDMODE from AppCompat layers"
+    fi
+
+    # -- 2d. Wine Mac Driver: allow the virtual desktop window to be moved ---
+    # macdrv's `AllowImmovableWindows` defaults to true, which freezes the
+    # NSWindow in place whenever Wine considers the window "disabled" or
+    # "maximized" — exactly the state the `/desktop=` virtual desktop is in.
+    # Set it to "n" so the user can drag the Wine window around macOS.
+    # (dlls/winemac.drv/macdrv_main.c: `allow_immovable_windows = true`)
+    if ! grep -q '"AllowImmovableWindows"' "$USER_REG"; then
+        python3 - "$USER_REG" <<'PYEOF'
+import sys, re
+path = sys.argv[1]
+with open(path, 'r', encoding='utf-8', errors='surrogateescape') as f:
+    data = f.read()
+section_re = re.compile(r'^\[Software\\\\Wine\\\\Mac Driver\][^\n]*\n', re.MULTILINE)
+m = section_re.search(data)
+if m:
+    # Section exists — append the key just after its header.
+    insert = '"AllowImmovableWindows"="n"\n'
+    data = data[:m.end()] + insert + data[m.end():]
+else:
+    # Create the section.
+    data = data.rstrip() + '\n\n[Software\\\\Wine\\\\Mac Driver]\n"AllowImmovableWindows"="n"\n'
+with open(path, 'w', encoding='utf-8', errors='surrogateescape') as f:
+    f.write(data)
+PYEOF
+        log_ok "Set AllowImmovableWindows=n (virtual desktop window becomes draggable)"
+    fi
 fi
 
 # -- 3. Build launch environment ---------------------------------------------
@@ -150,6 +226,55 @@ STEAM_ARGS=(
     -noverifyfiles
 )
 
+# Virtual-desktop wrapper.
+#
+# Without this, Wine's macdrv hands each Win32 top-level window straight
+# to AppKit, so any game that asks for fullscreen takes over the whole
+# display. Wrapping Steam (and everything it spawns) inside a single
+# Wine `explorer.exe /desktop=NAME,WxH` virtual desktop collapses the
+# whole Wine session into one macOS window and prevents games from
+# punching into native fullscreen space.
+#
+# Sizing: Wine's virtual-desktop window is `WS_POPUP` / borderless by
+# construction (see dlls/winemac.drv/cocoa_window.m), so macOS gives it
+# no title bar. That means the user cannot drag it around — wherever we
+# place it is where it stays for the session. The only sensible default
+# is therefore "as big as the usable display", which we detect here via
+# AppleScript on the Finder (it already excludes the menu bar).
+#
+# Overrides:
+#   WINE_VIRTUAL_DESKTOP=1024x768   explicit resolution
+#   WINE_VIRTUAL_DESKTOP=auto       re-detect (same as unset)
+#   WINE_VIRTUAL_DESKTOP=""         opt out entirely (Wine creates
+#                                   per-window NSWindows again)
+#
+# Scope: `/desktop=NAME` only applies to this explorer.exe and its
+# descendants, so unrelated Wine prefixes / apps are untouched.
+WINE_VIRTUAL_DESKTOP_NAME="${WINE_VIRTUAL_DESKTOP_NAME:-steam-on-m1-wine}"
+
+detect_display_size() {
+    # Finder's desktop window bounds return "0, 0, WIDTH, HEIGHT" in
+    # logical (not Retina-physical) pixels and already exclude the
+    # macOS menu bar, which is exactly what Wine's virtual desktop
+    # wants to fill.
+    local bounds width height
+    bounds=$(osascript -e 'tell application "Finder" to get bounds of window of desktop' 2>/dev/null || true)
+    if [[ "$bounds" =~ ,[[:space:]]*([0-9]+),[[:space:]]*([0-9]+)$ ]]; then
+        width="${BASH_REMATCH[1]}"
+        height="${BASH_REMATCH[2]}"
+        if [[ "$width" -gt 0 && "$height" -gt 0 ]]; then
+            echo "${width}x${height}"
+            return 0
+        fi
+    fi
+    # Fallback to a Retina-13" default if detection fails.
+    echo "1440x900"
+}
+
+if [[ -z "${WINE_VIRTUAL_DESKTOP+x}" || "${WINE_VIRTUAL_DESKTOP:-}" == "auto" ]]; then
+    WINE_VIRTUAL_DESKTOP="$(detect_display_size)"
+fi
+
 # Clear old log so tailing is unambiguous.
 : > "$LOG_FILE"
 
@@ -158,14 +283,27 @@ log_info "Prefix           : $WINEPREFIX"
 log_info "Wine binary      : $WINE_BIN"
 log_info "WINEDLLOVERRIDES : $WINEDLLOVERRIDES"
 log_info "Steam flags      : ${STEAM_ARGS[*]}"
+if [[ -n "$WINE_VIRTUAL_DESKTOP" ]]; then
+    log_info "Virtual desktop  : ${WINE_VIRTUAL_DESKTOP_NAME} @ ${WINE_VIRTUAL_DESKTOP}"
+else
+    log_info "Virtual desktop  : disabled"
+fi
 log_info "Log file         : $LOG_FILE"
 
 cd "$WINEPREFIX/drive_c/Program Files (x86)/Steam" \
     || die "Cannot cd into Steam install directory"
-nohup arch -x86_64 "$WINE_BIN" \
-    "C:\\Program Files (x86)\\Steam\\Steam.exe" \
-    "${STEAM_ARGS[@]}" \
-    >"$LOG_FILE" 2>&1 &
+if [[ -n "$WINE_VIRTUAL_DESKTOP" ]]; then
+    nohup arch -x86_64 "$WINE_BIN" \
+        explorer.exe "/desktop=${WINE_VIRTUAL_DESKTOP_NAME},${WINE_VIRTUAL_DESKTOP}" \
+        "C:\\Program Files (x86)\\Steam\\Steam.exe" \
+        "${STEAM_ARGS[@]}" \
+        >"$LOG_FILE" 2>&1 &
+else
+    nohup arch -x86_64 "$WINE_BIN" \
+        "C:\\Program Files (x86)\\Steam\\Steam.exe" \
+        "${STEAM_ARGS[@]}" \
+        >"$LOG_FILE" 2>&1 &
+fi
 STEAM_PID=$!
 disown
 log_ok "Launched Steam (host pid=$STEAM_PID)"

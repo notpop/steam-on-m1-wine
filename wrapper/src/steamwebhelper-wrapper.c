@@ -1,10 +1,11 @@
 /*
  * SPDX-License-Identifier: MIT
  *
- * steamwebhelper-wrapper — prepend --in-process-gpu and delegate to the
+ * steamwebhelper-wrapper — prepend Chromium flags and delegate to the
  * real Steam webhelper binary. Used on macOS / Apple Silicon to work
- * around DXMT's lack of cross-process swap-chain support (see
- * https://github.com/3Shain/dxmt/issues/141).
+ * around black-screen rendering and Wine winsock issues that otherwise
+ * kill Steam's CEF UI on DXMT. See EXTRA_FLAGS below for the current
+ * flag set and the reasoning behind each.
  *
  * Build
  * -----
@@ -22,7 +23,7 @@
  * -----------------
  *   - Resolves its own directory via GetModuleFileNameW
  *   - Builds the child command line in the form:
- *         "<dir>\\steamwebhelper_real.exe" --in-process-gpu <original args>
+ *         "<dir>\\steamwebhelper_real.exe" <EXTRA_FLAGS> <original args>
  *   - Calls CreateProcessW, waits, and returns the child's exit code.
  *
  * Notes
@@ -32,8 +33,8 @@
  *     C:\users\notpop\AppData\Local\Steam\htmlcache.
  *   - Uses -mwindows so Windows treats the wrapper as a GUI app (same
  *     subsystem Steam's original helper declares). Debug prints go to
- *     stderr via _wfreopen if STEAMWEBHELPER_WRAPPER_DEBUG is set in
- *     the environment.
+ *     a log file next to the wrapper if STEAMWEBHELPER_WRAPPER_DEBUG
+ *     is set in the environment.
  */
 
 #ifndef UNICODE
@@ -52,35 +53,37 @@
 /*
  * Flags prepended to every invocation of steamwebhelper_real.exe.
  *
- * --in-process-gpu
- *     Run the Chromium GPU code inside the browser process. Required
- *     because DXMT (v0.74) does not yet support cross-process D3D11
- *     swap chains (https://github.com/3Shain/dxmt/issues/141).
+ * --disable-gpu
+ *     Force Chromium CPU rasterisation. With the GPU process enabled
+ *     CEF hits an ANGLE / D3D-over-OpenGL path that paints the browser
+ *     window black on Wine/Apple Silicon (DXMT Issue #141). CPU raster
+ *     via Skia is sufficient for Steam's 2D UI.
  *
  * --single-process
- *     Collapse renderer and utility (network / storage / data_decoder)
- *     into the browser process as well. Without this flag the
- *     renderer still opens a D3D11 SwapChain from its own process and
- *     hits the same DXMT limitation; the utility process similarly
- *     opens Chromium's out-of-process NetworkService, which triggers
- *     the `handshake failed; net_error -100` SSL cascade on Wine's
- *     winsock implementation. This flag is heavier-handed but matches
- *     the workaround that DXMT users report actually working.
- */
-/*
- * Step 1 of our plan (--in-process-gpu + --single-process + DXMT) merged
- * every subprocess back into the browser but the browser window still
- * refused to paint: the DXMT-accelerated composite surface hits
- * "Cannot use V8 Proxy resolver in single process mode" and related
- * CEF-in-single-process limits before drawing any HTML.
+ *     Collapse renderer / utility / gpu back into the browser process.
+ *     Without this flag:
+ *       - The renderer process opens its own D3D11 swapchain and hits
+ *         the cross-process limitation in DXMT Issue #141, painting the
+ *         browser window black.
+ *       - The NetworkService runs in a separate utility process and
+ *         talks TLS via Wine's winsock implementation, which triggers
+ *         the `handshake failed; net_error -100 / -107` cascade.
+ *     We tried the narrower `--enable-features=NetworkServiceInProcess`
+ *     alone but CEF 126 in Steam ignored it — a utility process
+ *     labelled `network.mojom.NetworkService` still spawned, the SSL
+ *     cascade still fired, and the renderer still painted black.
+ *     Until there is a Chromium-supported single-flag replacement for
+ *     `--single-process`, this is the only configuration that keeps
+ *     Steam's CEF UI responsive and authenticated on Wine 11.
  *
- * Step 2 fallback: give Chromium CPU rasterisation by passing
- * --disable-gpu. This side-steps DXMT entirely (d3d11 is never
- * opened), lets CEF fall back to the well-trodden Skia software
- * path, and keeps --single-process so the renderer-side crash
- * still doesn't happen.
- *
- * For a 2D idle game like 幻獣大農場 software rendering is sufficient.
+ *     On the DXMT side, `winemetal_unix.c::_CreateMetalViewFromHWND`
+ *     does its AppKit work directly when it's already on the main
+ *     thread (Unity-style engines call CreateSwapChainForHwnd from the
+ *     main thread), which avoids the deadlock we hit when naively
+ *     dispatching through Wine's `OnMainThread`. See the comment there
+ *     for details; the upshot is that `--single-process` does not by
+ *     itself block the Metal view handover, contrary to what we
+ *     suspected during the v0.5 investigation.
  */
 #define EXTRA_FLAGS  L"--disable-gpu --single-process"
 #define REAL_BINARY  L"steamwebhelper_real.exe"

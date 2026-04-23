@@ -1,212 +1,241 @@
 # steam-on-m1-wine
 
-Reproducible, script-driven setup for running the Windows **Steam** client
-on an Apple Silicon (M-series) Mac via Homebrew-packaged Wine — no paid
-compatibility layer required.
+Reproducible, script-driven setup for running the Windows **Steam**
+client **and D3D11 games** on an Apple Silicon Mac via Homebrew-packaged
+Wine — no paid compatibility layer required. One command, one Dock
+icon.
 
-> **Status:** v0.5 — visibility problem fixed, `client_cocoa_view`
-> race identified as the next wall. Steam UI is fully functional;
-> game rendering is blocked by a Wine 11 `macdrv` lifecycle change
-> (the Cocoa view is not yet populated in `struct macdrv_win_data`
-> at the point DXMT reads it). Full write-up + reproducible
-> evidence in [`docs/dxmt-diagnosis.md`](docs/dxmt-diagnosis.md).
-> Drafts of the two upstream reports (DXMT short bug report,
-> WineHQ Bugzilla ticket) are in `docs/upstream-issue-draft.md`
-> and `docs/wine-bugzilla-draft.md`.
-> Tracks the upstream state of Wine, DXMT, and Steam as of April 2026.
-> Targets macOS Tahoe 26.x on M1 / M2 / M3 / M4 hardware.
-
-## What works (v0.2)
-
-On the reference machine (M1 MacBook Pro 13" 2020, 16 GB, macOS Tahoe
-26.4) `scripts/launch-steam.sh` produces:
-
-- **Steam UI**: fully rendered store, library, and navigation, Japanese
-  text via Hiragino Sans GB, authenticated login against Valve's
-  servers, cart and wishlist visible.
-- **Game launch**: a 32-bit Unity 6000 title (幻獣大農場) spawns, passes
-  `D3D11CreateDevice` (sees `Renderer: Apple M1`), completes Unity
-  engine initialisation (`[Physics::Module]` and `Input initialized`
-  in `Player.log`), and registers a macOS window.
-
-## What is still blocked (v0.3)
-
-- **Game rendering** — the game's `Present()` calls never seem to reach
-  the `CAMetalLayer` the `NSWindow` is backed by. The window exists
-  at 3840x2160 (Retina raw pixels) but stays transparent / lets the
-  desktop wallpaper show through. See `docs/troubleshooting.md`.
-- Upstream status as of 2026-04-23: **not fixed in DXMT master HEAD**.
-  We tested the most recent CI artifact (commit `43a16e9`, covering
-  `40fae03` "present rect for d3dkmt" and `719d247` "defatalize
-  IDXGISwapChain1/2/3 stubs"). The symptom shape changed — the game
-  process goes from 100% CPU busy-looping on v0.74 to 0% CPU idle
-  waiting on master — but the final frame never reaches the screen.
-  Full write-up in `docs/dxmt-nightly-experiment.md`.
-- Next experiment: fork DXMT, add traces around
-  `IDXGISwapChain::Present` → `CAMetalLayer.nextDrawable` →
-  `presentDrawable:` and inspect where the macOS Tahoe AppKit
-  lifecycle swallows the frame. Tracked separately in the
-  `experimental/` scripts and the forthcoming fork branch.
-
-## How it gets there
-
-The working combination, from outer layer to inner:
-
-```
-macOS Tahoe 26.4 (arm64)
- └── Rosetta 2 (x86_64 → arm64)
-      └── Wine 11.0 stable (Homebrew cask)
-           ├── Steam.exe
-           │    └── steamwebhelper.exe  (replaced by our C wrapper)
-           │         └── steamwebhelper_real.exe --disable-gpu --single-process
-           │              → Chromium CPU raster; UI renders
-           └── MonsterFarm.exe (Unity 6000, 32-bit)
-                └── D3D11 → DXMT → Metal
-```
-
-1. **Wine 11.0 stable** (Homebrew cask, `com.apple.quarantine` stripped)
-2. **DXMT v0.74** staged into both 64-bit and 32-bit Wine slots
-   (`lib/wine/x86_64-windows/` + `lib/wine/i386-windows/` +
-   `system32` + `syswow64`). 32-bit is required for Unity games that
-   ship as 32-bit Windows binaries.
-3. **Self-compiled `steamwebhelper` wrapper** that renames the Valve
-   binary to `steamwebhelper_real.exe` and prepends
-   `--disable-gpu --single-process` to every invocation. This
-   collapses renderer / utility / gpu-process back into the browser
-   process, dodging:
-   - DXMT Issue #141 (no cross-process D3D11 swapchain)
-   - Wine's flaky winsock path inside Chromium's out-of-process
-     NetworkService
-4. **`-noverifyfiles -no-cef-sandbox -cef-single-process`** passed to
-   `Steam.exe` so the wrapper is not checksum-swapped back to Valve's
-   binary at boot.
-5. **`WINEDLLOVERRIDES`** chains the pieces above:
-   `dxgi,d3d11,d3d10core=n,b` (DXMT native for games)
-   `bcrypt=b;ncrypt=b` (Wine builtin to avoid BoringSSL conflicts)
-   `gameoverlayrenderer,gameoverlayrenderer64=d`
-   (hard-disable Steam's overlay DLL injection; otherwise it hooks
-   Unity's D3D11 and deadlocks `GfxDevice: creating device client`).
-6. **Japanese font substitution** registry (`Replacements` under
-   `HKCU\Software\Wine\Fonts\`) maps `MS Shell Dlg`, `MS UI Gothic`,
-   `Tahoma`, `Segoe UI`, … to Hiragino Sans GB.
-7. **`RetinaMode=n`** for the Wine Mac driver is registered but does
-   not appear to be honoured by Unity 6000's resolution probe (the
-   window still opens at raw-pixel 3840x2160 and ignores
-   `-screen-width`).
-
-## Known limits at v0.2
-
-- The `--disable-gpu` setting applies to Chromium (Steam UI) only.
-  Games still go through DXMT for D3D11 translation and therefore
-  inherit whatever bugs DXMT has under macOS Tahoe + Wine 11.
-- Heavy 3D titles are unlikely to work well on the CPU fallback
-  Chromium path anyway; the goal here is 2D / idle titles.
-- `scripts/05-fix-ssl.sh` offers `INSTALL_COREFONTS=1` as an opt-in;
-  not required for Japanese UI.
+> **Status:** v0.6 — Steam UI works, and D3D11 games render.
+> Validated on a 32-bit Unity 6000 title
+> (幻獣大農場 / MonsterFarm) on M1 MacBook Pro 13" (2020), macOS Tahoe
+> 26.4. The remaining transparent-window issue tracked through v0.2–v0.5
+> turned out to be *three* stacked bugs; only the first (Wine symbol
+> visibility) had been reported publicly. The other two — macdrv struct
+> ABI drift, and `OnMainThread` re-entrance deadlock — are fixed in the
+> DXMT fork that this repo builds. Full write-up in
+> [`docs/dxmt-diagnosis.md`](docs/dxmt-diagnosis.md) (Phase D).
 
 ## Why this project exists
 
-Running the Windows build of Steam on a modern Mac is harder than it looks:
+Running the Windows build of Steam — and the games you buy on it — on a
+modern Mac is harder than it looks on the free path:
 
-1. **Whisky** (the once-popular free GUI) has frozen on Wine 7.7 (2022). That
-   version can no longer boot the 2026 Steam client — the bootstrapper dies
-   with `Client version: no bootstrapper found` in a 10-second crash loop.
-2. **Apple's Game Porting Toolkit 1.1** (free) is also Wine 7.7 and hits the
-   same ceiling.
-3. **Homebrew's `wine-stable` / `wine@devel`** (Wine 11.x, 2026) boot the
-   client, but CEF / Chrome 126 inside Steam paints a **black window** due
-   to an ANGLE / Direct3D-over-OpenGL mismatch on Apple Silicon. This is
-   tracked upstream as [DXMT Issue #141](https://github.com/3Shain/dxmt/issues/141).
-4. **CrossOver** (paid, ~$74/year) ships CodeWeavers' in-house patches and
-   works out of the box — but this project is about the permanent-free path.
+| | Price | Wine version | Steam 2026 boot | D3D11 games | macOS Tahoe 26 |
+| --- | --- | --- | --- | --- | --- |
+| **Whisky** | free | 7.7 (frozen 2022) | ✗ (bootstrapper crash loop) | ✗ | ✗ |
+| **Apple Game Porting Toolkit 1.1** | free | 7.7 | ✗ (same ceiling) | ✗ | ✗ |
+| **Homebrew `wine-stable` 11.0** | free | 11.0 | black window (DXMT issue #141) | transparent window | boots |
+| **CrossOver** | paid (~¥10k/yr) | in-house | ✓ | ✓ | ✓ |
+| **this repo (v0.6)** | free | 11.0 + rebuild | ✓ | ✓ | ✓ |
 
-`steam-on-m1-wine` is the set of scripts, notes, and small helper binaries
-that close the remaining gaps on the free path.
+Whisky and GPTK have been frozen at Wine 7.7 since 2022, and Valve's
+2026 Steam client will not boot on them. Homebrew's `wine-stable` 11.0
+does boot Steam, but CEF / Chrome 126 paints the browser window black
+(DXMT [#141](https://github.com/3Shain/dxmt/issues/141)) and D3D11
+titles render to transparent windows.
+
+This repo closes the gap on the free path by combining four fixes that
+are not available off the shelf:
+
+1. **A custom `steamwebhelper` wrapper** that forces CEF into
+   `--disable-gpu --single-process` (sidesteps the black-window bug and
+   Wine's winsock NetworkService issue).
+2. **A Wine 11 build with `-fvisibility=default`**, so macdrv's public
+   API is callable via `dlsym` by third-party Metal layers.
+3. **A DXMT fork** that rewrites `_CreateMetalViewFromHWND` around two
+   Wine 11 bugs: (a) the internal `macdrv_win_data` struct no longer
+   exposes a usable NSView at swap-chain creation, and (b) wrapping
+   macdrv's Metal helpers in Wine's own `OnMainThread` re-enters and
+   deadlocks.
+4. **A virtual desktop wrapper** around Steam so the Wine session runs
+   inside a single, display-sized macOS window instead of seizing the
+   native fullscreen space.
+
+Each fix is explained in
+[`docs/dxmt-diagnosis.md`](docs/dxmt-diagnosis.md) and has a matching
+upstream-issue draft in [`docs/`](docs/).
+
+## What works (v0.6)
+
+On the reference machine (M1 MacBook Pro 13" 2020, 16 GB, macOS Tahoe
+26.4):
+
+- **Steam UI**: fully rendered, Japanese text via Hiragino Sans GB,
+  authenticated login against Valve's servers, library & store
+  navigation.
+- **Games**: 幻獣大農場 (32-bit Unity 6000) launches from the library,
+  passes `D3D11CreateDevice`, renders its title screen and farm scene,
+  and `IDXGISwapChain::Present1` returns `hr=0x0` every frame.
+- **Coexistence**: the whole Wine session runs inside a single macOS
+  window sized to the user's display (auto-detected), so Cmd+Tab,
+  Mission Control, and Dock Hide behave as expected.
 
 ## Hardware / OS requirements
 
-| Requirement   | Tested value                         |
-| ------------- | ------------------------------------ |
-| Mac           | MacBook Pro 13" M1 (2020), 16 GB     |
-| macOS         | Tahoe 26.4 (Build 25E246)            |
-| CPU features  | arm64 + Rosetta 2                    |
-| Xcode         | Command Line Tools installed         |
-| Homebrew      | 5.1.x, prefix `/opt/homebrew`        |
-| Disk headroom | ~10 GB (Wine + Steam + game assets)  |
-
-Other M-series chips and macOS 15 (Sequoia) are likely compatible but not
-currently validated in this repo.
-
-## What it installs
-
-| Component            | Source                              | Role                       |
-| -------------------- | ----------------------------------- | -------------------------- |
-| `wine-stable`        | Homebrew Cask (Gcenx)               | Wine 11.0 runtime          |
-| `winetricks`         | Homebrew formula                    | Prefix tweaks              |
-| `gstreamer-runtime`  | Homebrew Cask                       | Wine audio/video codecs    |
-| Japanese system fonts| `/System/Library/` (user-owned)     | Steam UI glyphs            |
-| DXMT                 | Official GitHub Release (tagged)    | D3D11 → Metal layer        |
-| Steam client         | `cdn.cloudflare.steamstatic.com`    | Installed on demand        |
-
-**Steam binaries are never committed to this repository.** They are fetched
-from the official Valve CDN the first time you run `scripts/03-install-steam.sh`.
+| Requirement | Tested value |
+| --- | --- |
+| Mac | Apple Silicon (M1 reference; M2/M3/M4 assumed compatible, not validated) |
+| macOS | Tahoe 26.4 (Build 25E246). Sequoia 15 assumed compatible, not validated. |
+| CPU features | arm64 + Rosetta 2 |
+| Xcode | Command Line Tools |
+| Homebrew | 5.1.x, prefix `/opt/homebrew` |
+| Disk headroom | ~20 GB (Wine + Steam + game assets + DXMT build toolchain) |
 
 ## Quick start
 
 ```bash
-git clone https://github.com/<you>/steam-on-m1-wine.git
+git clone https://github.com/notpop/steam-on-m1-wine.git
 cd steam-on-m1-wine
 
-# Run each step in order. Every script is idempotent —
-# rerunning after a fix is safe.
-scripts/00-prereqs.sh
-scripts/01-install-wine.sh     # needs one sudo prompt for GStreamer .pkg
-scripts/02-setup-prefix.sh
-scripts/03-install-steam.sh
-scripts/04-install-dxmt.sh
-scripts/05-fix-ssl.sh
-scripts/06-install-wrapper.sh
+# One-shot: prereqs → wine → prefix → Steam install → DXMT → wrapper →
+# macOS .app bundle. Idempotent; re-running is a no-op if already done.
+bash install.sh
 
-# Then, any time you want to play:
-scripts/launch-steam.sh
+# Recommended: pin the app to the Dock
+bash scripts/10-add-to-dock.sh
+
+# For D3D11 games (adds the v0.6 DXMT fork):
+bash scripts/experimental/07-build-dxmt-from-fork.sh
 ```
+
+After `install.sh`, there are three equivalent ways to launch Steam:
+
+- **Dock icon** (if you ran `10-add-to-dock.sh`) — one click.
+- `open ~/Applications/Steam\ on\ M1\ Wine.app`
+- `bash scripts/launch-steam.sh --detach`
+
+Launching with DXMT debug logging (writes to `/tmp/dxmt-logs/`):
+
+```bash
+bash scripts/experimental/run-with-dxmt-debug.sh
+```
+
+## Game-specific launch options (manual, per game)
+
+Steam's Launch Options are per-game and per-Steam-account, so the repo
+cannot pre-populate them. In the game's Steam Library entry:
+
+1. Right-click → Properties → General → Launch Options
+2. Paste a baseline set appropriate for Unity titles, e.g.:
+   ```
+   -force-d3d11-no-singlethreaded -screen-fullscreen 0
+   ```
+3. Close the dialog; Steam auto-saves.
+
+What the flags do:
+
+- `-force-d3d11-no-singlethreaded` — ask Unity to create the D3D11
+  device in multi-threaded mode. Retained defensively; may be
+  removable on v0.6 for games that render correctly without it.
+- `-screen-fullscreen 0` — force windowed mode, so the game draws inside
+  the Wine virtual desktop instead of asking for macOS fullscreen.
+- (Optional) `-screen-width W -screen-height H` — pin the internal
+  render resolution. Omit to let Unity use the virtual desktop's native
+  resolution (preserves aspect ratio).
+
+## Known limits
+
+- **The game window cannot be dragged.** Wine's virtual desktop window
+  is `WS_POPUP` / borderless by construction, so macOS gives it no
+  title bar. The virtual desktop is sized to the display on startup;
+  the user interacts with it via Mission Control / Cmd+Tab, not by
+  dragging. Opt out with `WINE_VIRTUAL_DESKTOP=""` if you prefer
+  per-window NSWindows (Steam UI becomes draggable, games still
+  cannot be because Unity's `-popupwindow` / Canvas Scaler logic
+  strips window chrome).
+- **Heavy 3D titles are unlikely to run well** on the CPU Chromium
+  path the wrapper uses for the Steam UI. The repo targets 2D / idle
+  / low-spec titles. Unity engine games render through DXMT on the GPU
+  and can hit its current coverage (no geometry shaders, etc).
+- **`-force-d3d11-no-singlethreaded`** is retained defensively; it may
+  not be required on v0.6. See the tracking task in the repo.
+- **Steam Launch Options are per-user**; this repo cannot edit
+  `localconfig.vdf` without risking account corruption, so the
+  per-game flags above are documented as a manual step.
+- **Virtual desktop resolution follows the display at launch time.**
+  If you move Steam to a different display, exit and relaunch.
+
+## What gets installed
+
+| Component | Source | Role |
+| --- | --- | --- |
+| `wine-stable` | Homebrew Cask (Gcenx) | Wine 11.0 runtime |
+| `winetricks` | Homebrew formula | Prefix tweaks |
+| `gstreamer-runtime` | Homebrew Cask | Wine audio/video codecs |
+| Japanese system fonts | `/System/Library/` (user-owned) | Steam UI glyphs |
+| DXMT fork | `github.com/notpop/dxmt@debug/present-path-tracing` | D3D11 → Metal |
+| steamwebhelper wrapper | Built from `wrapper/` (mingw-w64) | CEF flag injector |
+| Steam client | `cdn.cloudflare.steamstatic.com` | Installed on demand |
+| macOS `.app` bundle | Generated locally | Dock launcher |
+
+Steam binaries and Windows DLLs are **never** redistributed through
+this repository — everything with licensing friction is fetched live
+from the vendor the first time the corresponding script runs.
 
 ## Repository layout
 
 ```
 .
-├── README.md                # This file
-├── LICENSE                  # MIT + third-party notices
+├── README.md                 # This file
+├── install.sh                # One-shot orchestrator
+├── LICENSE                   # MIT + third-party notices
 ├── docs/
-│   ├── architecture.md      # How the pieces fit together
-│   ├── troubleshooting.md   # Symptoms → fixes
-│   └── references.md        # Upstream issues & commits
+│   ├── architecture.md       # How the pieces fit together
+│   ├── troubleshooting.md    # Symptoms → fixes
+│   ├── references.md         # Upstream issues & commits
+│   ├── dxmt-diagnosis.md     # Full multi-phase root-cause writeup
+│   ├── upstream-issue-draft.md  # Draft for the DXMT repo
+│   └── wine-bugzilla-draft.md   # Draft for WineHQ Bugzilla
 ├── scripts/
-│   ├── lib/common.sh        # Logging + env helpers shared by all scripts
-│   ├── 00-prereqs.sh        # Verify Rosetta / Homebrew / Xcode
-│   ├── 01-install-wine.sh   # Install Wine + winetricks via brew
-│   ├── 02-setup-prefix.sh   # Create WINEPREFIX, copy JP fonts
-│   ├── 03-install-steam.sh  # Download SteamSetup.exe, silent install
-│   ├── 04-install-dxmt.sh   # Vendor DXMT DLLs into the prefix
-│   ├── 05-fix-ssl.sh        # TLS/Winsock workarounds
-│   ├── 06-install-wrapper.sh# Install steamwebhelper wrapper
-│   └── launch-steam.sh      # Launch with the agreed flag set
+│   ├── lib/common.sh
+│   ├── 00-prereqs.sh
+│   ├── 01-install-wine.sh
+│   ├── 02-setup-prefix.sh
+│   ├── 03-install-steam.sh
+│   ├── 04-install-dxmt.sh          # v0.74 official fallback
+│   ├── 05-fix-ssl.sh
+│   ├── 06-install-wrapper.sh
+│   ├── 09-install-macos-app.sh     # Generate the Dock .app bundle
+│   ├── 10-add-to-dock.sh           # Optional: pin to Dock via defaults
+│   ├── launch-steam.sh             # Manual launch
+│   └── experimental/
+│       ├── 07-build-dxmt-from-fork.sh
+│       ├── 04b-install-dxmt-nightly.sh
+│       ├── 04b-revert-to-dxmt-v0.74.sh
+│       └── run-with-dxmt-debug.sh
 └── wrapper/
-    ├── src/                 # C source for the steamwebhelper wrapper
-    └── Makefile             # Cross-compile via x86_64-w64-mingw32-gcc
+    ├── src/                  # C source for the steamwebhelper wrapper
+    └── Makefile              # Cross-compile via x86_64-w64-mingw32-gcc
 ```
 
 ## Design principles
 
-- **Idempotent scripts.** Running any step twice is a no-op if already done.
-- **No secrets, no tokens.** The project never asks for a Steam password or
-  Steam Guard code — those are typed into Steam's own login dialog.
-- **No binary redistribution.** Everything that has licensing friction
-  (Steam, Windows DLLs) is fetched live from the vendor.
-- **Explicit versions.** Every upstream URL is pinned to a specific tag
-  / commit so behaviour is reproducible long after this README is written.
+- **Idempotent scripts.** Running any step twice is a no-op if the work
+  is already done. `install.sh` can be re-run any time.
+- **No secrets, no tokens.** The project never asks for a Steam
+  password or Steam Guard code — those are typed into Steam's own
+  login dialog.
+- **No binary redistribution** of anything with licensing friction
+  (Steam, Windows DLLs). Everything is fetched live from the vendor.
+- **Explicit versions.** Upstream URLs are pinned to tags / commits so
+  behaviour is reproducible long after this README was written.
+- **Upstream-able fixes.** The DXMT fork diff is ~150 lines over the
+  upstream commit it forks from, with no dead code. See
+  [`docs/upstream-issue-draft.md`](docs/upstream-issue-draft.md) for
+  the write-up aimed at 3Shain's DXMT repo.
+
+## References
+
+- Wine macdrv visibility patch origin:
+  [3Shain/wine@6197fc7](https://github.com/3Shain/wine/commit/6197fc7)
+- DXMT upstream: <https://github.com/3Shain/dxmt>
+- DXMT fork used here:
+  `github.com/notpop/dxmt@debug/present-path-tracing`
+- Cross-process swapchain issue:
+  [DXMT #141](https://github.com/3Shain/dxmt/issues/141)
+- Full technical diagnosis: [`docs/dxmt-diagnosis.md`](docs/dxmt-diagnosis.md)
 
 ## License
 
-MIT. See [LICENSE](LICENSE) for the full text and for the third-party
-component attributions.
+MIT. See [LICENSE](LICENSE) for the full text and third-party component
+attributions.

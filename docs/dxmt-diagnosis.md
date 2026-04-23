@@ -197,3 +197,124 @@ nm -g "/Applications/Wine Stable.app/Contents/Resources/wine/lib/wine/x86_64-uni
 
 `docs/evidence/*.txt` contains the capture used above, so the
 report can be re-verified from the repository alone.
+
+## Phase D: OnMainThread re-entrance deadlock (2026-04-23, v0.6 shipped)
+
+### The residual NULL after Phase C
+
+After Phase C (rebuilding Wine with `-fvisibility=default`), DXMT's
+`_CreateMetalViewFromHWND` could resolve every symbol it looked up
+(`get_win_data`, `release_win_data`, `macdrv_view_create_metal_view`,
+`macdrv_view_get_metal_layer`) and `get_win_data(hwnd)` did return a
+valid `struct macdrv_win_data*`. But the `client_cocoa_view` field
+DXMT read from it was always NULL at swap-chain creation time.
+
+Reason: in Wine 11 the field was renamed to `client_view`, and —
+more importantly — it is only populated in the GDI present path, in
+`dlls/winemac.drv/window.c:1131-1135`
+(`macdrv_client_surface_present()`). It is NULL until the game has
+actually rendered a frame through GDI, but DXMT reads it at
+`IDXGISwapChain` creation time, before any rendering has happened.
+So the layout drift between 3Shain's Wine 8.16 fork and upstream
+Wine 11 was only half the story — the other half is that even when
+you read the correct field under the new name, it is still NULL
+because of when it gets assigned.
+
+### The OnMainThread trap
+
+The obvious next move was to dispatch the Cocoa work to the AppKit
+main thread, because AppKit requires NSView / CAMetalLayer mutation
+on the main thread. Wine's macdrv ships a helper exactly for this:
+`OnMainThread(dispatch_block_t)` (`cocoa_event.m:489`). A naive patch
+wraps the whole metal-view setup in `OnMainThread(^{...})`.
+
+That patch froze the game. No crash, no deadlock error, just a
+process burning 0% CPU forever.
+
+The trap is in two files:
+
+1. `dlls/winemac.drv/cocoa_window.m` lines 3941, 3954, 3966 —
+   `macdrv_view_create_metal_view`, `macdrv_view_get_metal_layer`,
+   and `macdrv_view_release_metal_view` are each already implemented
+   as `OnMainThread(^{ ... })`.
+
+2. `dlls/winemac.drv/cocoa_event.m:489` — `OnMainThread` itself is
+   implemented as `OnMainThreadAsync(^{ block(); finished = TRUE;
+   ... })` followed by a blocking wait on either a
+   `dispatch_semaphore` or a NtUser event-queue pump. It is **not
+   re-entrant**: calling it from the main thread makes the main
+   thread block on a semaphore that the main thread itself is
+   supposed to release.
+
+Wrapping `macdrv_view_create_metal_view` in `OnMainThread` is
+therefore a nested `OnMainThread`: the outer wait suspends the main
+thread, and the inner block posted by `macdrv_view_create_metal_view`
+never runs.
+
+### The fix
+
+The fix has three pieces, all in
+`src/winemetal/unix/winemetal_unix.c`:
+
+1. **Stop reading the internal struct.** The layout drifts between
+   Wine forks and the NULL-until-present-path behaviour makes the
+   field unusable at the point we need it. Replace the struct
+   definition with a forward declaration only (to keep the
+   `get_win_data` / `release_win_data` signatures in scope) and
+   resolve the view indirectly.
+
+2. **Use the stable public accessor.** `macdrv_get_cocoa_window(HWND,
+   BOOL)` has been in `macdrv.h` since Wine 8 and returns the
+   `WineWindow*` (an NSWindow subclass). Its `contentView` is the
+   NSView we need to attach a Metal view to, and it is populated
+   synchronously during `CreateWindowEx`, so there is no race.
+
+3. **Do not wrap macdrv helpers.** `create_metal_view` /
+   `get_metal_layer` / `release_metal_view` handle the main-thread
+   hop internally, so DXMT's unixlib must call them from the Wine
+   NtUser caller thread, *not* the main thread. The only Cocoa call
+   the unixlib still does itself is `[NSWindow contentView]`, which
+   is genuinely main-thread-only — that one call is dispatched
+   through `OnMainThread` (with `pthread_main_np` +
+   `dispatch_sync` as fallbacks for Wine builds where the symbol is
+   hidden).
+
+### Evidence — game rendering
+
+Re-running with `DXMT_LOG_LEVEL=debug DXMT_DEBUG_METAL_VIEW=1` after
+the v0.6 fix:
+
+```
+[dxmt/winemetal] CreateMetalViewFromHWND: hwnd=0x401a6
+  macdrv_functions=0x0 get_cocoa_window=0x20c42dec0
+  create_metal_view=0x20c40eec0 get_metal_layer=0x20c40f0e0
+  on_main_thread=0x20c3fa340
+[dxmt/winemetal] CreateMetalViewFromHWND: cocoa_window=0x7faf9c90e4c0
+[dxmt/winemetal] CreateMetalViewFromHWND: content_view=0x7faf9c82c640
+[dxmt/winemetal] CreateMetalViewFromHWND: view=0x7faf9c85df60
+[dxmt/winemetal] CreateMetalViewFromHWND: done hwnd=0x401a6
+  cocoa_window=0x7faf9c90e4c0 content_view=0x7faf9c82c640
+  view=0x7faf9c85df60 layer=0x6000008e2d60
+```
+
+`MonsterFarm_d3d11.log` then fills with thousands of:
+
+```
+debug: DXMT trace Present1: sync=0 flags=0 minimized=0 w=1440
+  h=900 swap_effect=0 hr=0x0
+```
+
+The game's title screen and farm scene actually render inside the
+macOS window. This was the first successful render of a 32-bit
+Unity 6000 D3D11 title through DXMT on Wine 11 stable, Apple
+Silicon, macOS Tahoe 26.4.
+
+### What this means for the upstream report
+
+The transparent-window issue decomposes into three stacked bugs, of
+which only Phase A/B/C's visibility problem has been previously
+reported publicly. The v0.6 fix addresses all three. The DXMT-side
+write-up in `docs/upstream-issue-draft.md` and the Wine-side report
+in `docs/wine-bugzilla-draft.md` now have to describe both the ABI
+drift and the OnMainThread re-entrance — neither is visible from the
+visibility-only symptom.
