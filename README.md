@@ -246,5 +246,9 @@ from the vendor the first time the corresponding script runs.
 
 ## License
 
-MIT. See [LICENSE](LICENSE) for the full text and third-party
-attributions.
+MIT — see [LICENSE](LICENSE) for the full text.
+
+Third-party component attributions (Wine, DXMT, LLVM, mingw-w64,
+Homebrew, etc.) are collected in [NOTICE](NOTICE). None of them is
+vendored into this repository; each is installed from its upstream
+distribution channel at setup time.
