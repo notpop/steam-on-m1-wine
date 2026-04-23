@@ -117,9 +117,59 @@ simply aren't in the dynamic symbol table of the `.so`.
 - Running any game that relies on `IDXGISwapChain` → Metal is
   currently blocked on Gcenx Wine 11.0, independent of any DXMT
   tweak we could apply locally.
-- The next experiment is to **build Wine 11 from source with
-  `-fvisibility=default`** and retry with the patched DXMT DLLs we
-  already staged. Tracked as Phase C.
+
+## Phase C: Wine 11 rebuilt with `-fvisibility=default`
+
+Reconfigured Wine 11.0 with `CFLAGS=-fvisibility=default
+CXXFLAGS=-fvisibility=default`, `make -j8`, then swapped the
+resulting `dlls/winemac.drv/winemac.so` over Gcenx's (backup kept
+as `winemac.so.gcenx-backup`). Results:
+
+- `nm -g | awk '$2=="T"' | wc -l` = **200** (from **0** on the
+  Gcenx build, **17** on 3Shain's v8.16 build). The whole public
+  surface of `winemac.drv` is now visible.
+- DXMT's `dlsym` probes **all succeed**:
+  ```
+  get_win_data=0x20c42de10   release_win_data=0x20c42de90
+  macdrv_view_create_metal_view=0x20c40eec0
+  macdrv_view_get_metal_layer=0x20c40f0e0
+  ```
+- `get_win_data(hwnd)` returns a valid `struct macdrv_win_data*`.
+
+### But a second wall appears
+
+```
+[dxmt/winemetal] CreateMetalViewFromHWND: hwnd=0x3019a
+  win_data=0x600001a2c000
+  client_cocoa_view=0x0       ← NULL
+  view=0x0  layer=0x0
+err:   Failed to create metal view, ...
+```
+
+The struct Wine returns has **`client_cocoa_view == NULL`** at the
+time DXMT inspects it. So even with the visibility fix, DXMT cannot
+hand a usable `NSView` to `macdrv_view_create_metal_view`. The
+evidence capture is in
+`docs/evidence/winemetal-stderr-after-fvisibility.txt`.
+
+Why: in `dlls/winemac.drv/window.c` Wine 11 populates
+`client_cocoa_view` from Cocoa callbacks that run on the main
+thread after the window is fully created. DXMT grabs
+`win_data->client_cocoa_view` synchronously from a thread that
+raced with that initialisation. 3Shain's Wine 8.16 fork didn't
+have this race (the field was set up front); between 8.16 and 11.0
+the macdrv window-lifecycle code was reorganised.
+
+This makes a **source-patch-level fix** a bigger change than just
+exposing symbols:
+
+- either DXMT must wait-or-retry until Cocoa populates the view
+- or Wine's `winemac.drv` must publish a synchronous
+  `macdrv_get_or_create_cocoa_view(hwnd)` helper
+
+Both are non-trivial. They are why this repo can document the
+problem exhaustively but cannot unblock gameplay on today's hard
+dependencies (Wine 11 + macOS Tahoe 26 + DXMT v0.74 / master).
 
 ## Reproduction steps
 

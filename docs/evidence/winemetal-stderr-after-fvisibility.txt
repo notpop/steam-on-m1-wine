@@ -1,0 +1,7 @@
+# winemetal stderr trace: after replacing Gcenx wine-stable 11.0 winemac.so
+# with a source-build wine-11.0 winemac.so compiled with CFLAGS=-fvisibility=default
+# (200 T symbols exported)
+
+[dxmt/winemetal] CreateMetalViewFromHWND: hwnd=0x3019a macdrv_functions=0x0 get_win_data=0x20c42de10 release_win_data=0x20c42de90 create_metal_view=0x20c40eec0 get_metal_layer=0x20c40f0e0
+[dxmt/winemetal] CreateMetalViewFromHWND: hwnd=0x3019a win_data=0x600001a2c000 client_cocoa_view=0x0 view=0x0 layer=0x0
+err:   Failed to create metal view, it seems like your Wine has no exported symbols needed by DXMT.

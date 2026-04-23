@@ -4,12 +4,15 @@ Reproducible, script-driven setup for running the Windows **Steam** client
 on an Apple Silicon (M-series) Mac via Homebrew-packaged Wine — no paid
 compatibility layer required.
 
-> **Status:** v0.4 — root cause of the transparent-window bug
-> identified. Steam UI is fully functional; game rendering is
-> blocked by Gcenx Wine 11.0 shipping `winemac.so` with no exported
-> symbols, so DXMT cannot acquire an `NSView`/`CAMetalLayer` and
-> silently returns an empty view. Full write-up + reproducible
+> **Status:** v0.5 — visibility problem fixed, `client_cocoa_view`
+> race identified as the next wall. Steam UI is fully functional;
+> game rendering is blocked by a Wine 11 `macdrv` lifecycle change
+> (the Cocoa view is not yet populated in `struct macdrv_win_data`
+> at the point DXMT reads it). Full write-up + reproducible
 > evidence in [`docs/dxmt-diagnosis.md`](docs/dxmt-diagnosis.md).
+> Drafts of the two upstream reports (DXMT short bug report,
+> WineHQ Bugzilla ticket) are in `docs/upstream-issue-draft.md`
+> and `docs/wine-bugzilla-draft.md`.
 > Tracks the upstream state of Wine, DXMT, and Steam as of April 2026.
 > Targets macOS Tahoe 26.x on M1 / M2 / M3 / M4 hardware.
 
