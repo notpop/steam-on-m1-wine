@@ -63,11 +63,42 @@ die() {
 export HOMEBREW_PREFIX
 export PATH="$HOMEBREW_PREFIX/bin:$PATH"
 
-: "${WINE_APP:=/Applications/Wine Stable.app}"
-: "${WINE_BIN:=$WINE_APP/Contents/Resources/wine/bin/wine}"
-: "${WINESERVER_BIN:=$WINE_APP/Contents/Resources/wine/bin/wineserver}"
+# Wine location. The wine-stable cask is still preferred, but Homebrew disabled
+# it on 2026-09-01 ("does not pass the macOS Gatekeeper check"), so
+# scripts/01-install-wine.sh can fall back to unpacking a Gcenx tarball under
+# $WINE_FALLBACK_ROOT. Gcenx ships only wine-devel and wine-staging tarballs;
+# there is no wine-stable tarball, hence the "Wine Staging.app" bundle name.
+: "${WINE_CASK_APP:=/Applications/Wine Stable.app}"
+: "${WINE_FALLBACK_VERSION:=11.10}"
+: "${WINE_FALLBACK_ROOT:=$HOME/wine-${WINE_FALLBACK_VERSION}}"
+: "${WINE_FALLBACK_APP:=${WINE_FALLBACK_ROOT}/Wine Staging.app}"
+
+# An explicit WINE_APP from the environment always wins and is never re-resolved.
+if [[ -n "${WINE_APP:-}" ]]; then
+    WINE_APP_PINNED=1
+else
+    WINE_APP_PINNED=0
+fi
+
+# Picks the cask install when it is present, the Gcenx fallback otherwise.
+# 01-install-wine.sh calls this again after installing, since which one exists
+# is not known until then.
+resolve_wine_app() {
+    if [[ "$WINE_APP_PINNED" != "1" ]]; then
+        if [[ -x "${WINE_CASK_APP}/Contents/Resources/wine/bin/wine" ]]; then
+            WINE_APP="$WINE_CASK_APP"
+        else
+            WINE_APP="$WINE_FALLBACK_APP"
+        fi
+    fi
+    WINE_BIN="$WINE_APP/Contents/Resources/wine/bin/wine"
+    WINESERVER_BIN="$WINE_APP/Contents/Resources/wine/bin/wineserver"
+    export WINE_APP WINE_BIN WINESERVER_BIN
+}
+resolve_wine_app
+
 : "${WINEPREFIX:=$HOME/.wine-steam}"
-export WINE_APP WINE_BIN WINESERVER_BIN WINEPREFIX
+export WINE_CASK_APP WINE_FALLBACK_VERSION WINE_FALLBACK_ROOT WINE_FALLBACK_APP WINEPREFIX
 
 # Wine often chats — callers can re-enable by exporting WINEDEBUG before.
 : "${WINEDEBUG:=-all}"
