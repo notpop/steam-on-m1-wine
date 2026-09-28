@@ -35,6 +35,19 @@ Pin the app to the Dock (idempotent, optional):
 bash scripts/10-add-to-dock.sh
 ```
 
+**Skip the source builds (recommended on macOS 26 / Wine 11.0):**
+
+```bash
+bash install.sh --prebuilt
+```
+
+Same end result, but downloads a verified bundle of the DXMT fork and
+the patched `winemac.so` instead of compiling LLVM, DXMT, and Wine.
+Takes minutes instead of an hour. The bundle's `BUILD-INFO.md` lists
+the exact source commits and patches it was built from; it is produced
+by [`scripts/package-prebuilt.sh`](scripts/package-prebuilt.sh). It
+only applies to Gcenx Wine 11.0 and refuses to install on anything else.
+
 In a hurry and just want the Steam UI (no D3D11 games) in ~10 min?
 
 ```bash

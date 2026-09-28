@@ -35,3 +35,4 @@ logs/
 .env
 .env.local
 config.local.sh
+dist/
