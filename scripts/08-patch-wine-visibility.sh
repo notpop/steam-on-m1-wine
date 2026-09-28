@@ -103,9 +103,18 @@ if (( _SKIP_TO_COPY == 0 )); then
         log_info "Running configure (arch -x86_64 for mingw-w64 toolchain probing)"
         (
             cd "$WINE_BUILD_SRC/build"
+            # Recent Xcode clang ignores the Rosetta arch preference and
+            # emits arm64 even under `arch -x86_64`, which makes configure
+            # inject -D__x86_64__ and collide the arm/i386 SDK headers.
+            # Pass -arch explicitly. freetype is disabled because only
+            # winemac.so is built here and Homebrew's freetype is arm64-only.
             arch -x86_64 ../configure \
                 --enable-win64 \
                 --disable-tests \
+                --without-freetype \
+                CC='clang -arch x86_64' \
+                CXX='clang++ -arch x86_64' \
+                OBJC='clang -arch x86_64' \
                 CFLAGS='-fvisibility=default -O2 -Wno-error' \
                 CXXFLAGS='-fvisibility=default -O2 -Wno-error'
         ) || die "Wine configure failed"

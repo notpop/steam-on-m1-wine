@@ -10,7 +10,7 @@
 # -------------------------------------------------
 # 1. Installs missing Homebrew packages (meson, ninja, bison, flex,
 #    cmake, gettext, mingw-w64, wget).
-# 2. Pins meson to 1.10.x via pip if the system meson is 1.11+.
+# 2. Pins meson to 1.10.2 (standalone download) unless 1.10.2+ is installed.
 # 3. Clones or updates the DXMT fork at $DXMT_SRC.
 # 4. Builds an x86_64 LLVM 15 static library tree at $LLVM_PREFIX
 #    (first run takes ~30 minutes).
@@ -74,7 +74,7 @@ for _pkg in meson ninja bison flex cmake gettext mingw-w64 wget; do
 done
 
 # ---------------------------------------------------------------------------
-# Step 2 — Pin meson to 1.10.x if the system version is 1.11+
+# Step 2 — Pin meson to 1.10.2 unless a compatible 1.10.x is installed
 # ---------------------------------------------------------------------------
 
 log_step "Step 2: meson version check"
@@ -82,41 +82,49 @@ log_step "Step 2: meson version check"
 # Default: use whatever brew installed.
 MESON="${MESON:-$HOMEBREW_PREFIX/bin/meson}"
 
-_meson_major_minor() {
-    # Prints "MAJOR.MINOR" as two integers separated by space: "1 10"
+MESON_PIN_VERSION="1.10.2"
+MESON_PIN_DIR="$DXMT_SRC/toolchains/meson-$MESON_PIN_VERSION"
+
+_meson_version() {
+    # Prints "MAJOR MINOR PATCH" as three integers: "1 10 2"
     "$1" --version 2>/dev/null \
         | head -n1 \
         | sed 's/^[^0-9]*//' \
-        | awk -F. '{print $1, $2}'
+        | awk -F. '{print $1, $2, ($3 == "" ? 0 : $3)+0}'
+}
+
+_pin_meson() {
+    # Download a standalone meson release rather than pip-installing it:
+    # pip --user fails on Homebrew's Python 3.14 (externally managed /
+    # ensurepip issues), whereas the release tarball runs as-is.
+    if [[ ! -f "$MESON_PIN_DIR/meson.py" ]]; then
+        log_info "Downloading standalone meson $MESON_PIN_VERSION"
+        mkdir -p "$DXMT_SRC/toolchains"
+        curl -fL "https://github.com/mesonbuild/meson/releases/download/$MESON_PIN_VERSION/meson-$MESON_PIN_VERSION.tar.gz" \
+            | tar -xz -C "$DXMT_SRC/toolchains" \
+            || die "Failed to download meson $MESON_PIN_VERSION"
+    fi
+    MESON="$MESON_PIN_DIR/meson.py"
+    export MESON
+    log_ok "Using pinned meson $("$MESON" --version) at $MESON"
 }
 
 if [[ -x "$MESON" ]]; then
-    read -r _meson_maj _meson_min <<< "$(_meson_major_minor "$MESON")"
-    log_info "System meson version: ${_meson_maj}.${_meson_min}"
+    read -r _meson_maj _meson_min _meson_pat <<< "$(_meson_version "$MESON")"
+    log_info "System meson version: ${_meson_maj}.${_meson_min}.${_meson_pat}"
 
-    # DXMT's meson.build is incompatible with meson 1.11+.
-    if (( _meson_maj > 1 || ( _meson_maj == 1 && _meson_min >= 11 ) )); then
-        log_warn "meson ${_meson_maj}.${_meson_min} is too new for DXMT (need 1.10.x)."
-        log_warn "Pinning to meson==1.10.1 via pip --user."
-        python3 -m pip install --user 'meson==1.10.1' --quiet
-
-        # Derive the user-base bin directory at runtime so it works on
-        # any Python 3 minor version.
-        _user_base=$(python3 -m site --user-base)
-        MESON="$_user_base/bin/meson"
-        export MESON
-
-        if [[ ! -x "$MESON" ]]; then
-            die "pip installed meson==1.10.1 but $MESON is not executable."
-        fi
-        read -r _new_maj _new_min <<< "$(_meson_major_minor "$MESON")"
-        log_ok "Using pinned meson ${_new_maj}.${_new_min} at $MESON"
+    # DXMT's meson.build is incompatible with meson 1.11+, and 1.10.0/1.10.1
+    # crash during setup with "KeyError: ... build.cpp_importstd" (fixed in
+    # 1.10.2). Anything outside 1.10.2+ within the 1.10 series gets pinned.
+    if (( _meson_maj != 1 || _meson_min != 10 || _meson_pat < 2 )); then
+        log_warn "meson ${_meson_maj}.${_meson_min}.${_meson_pat} is not compatible with DXMT (need 1.10.2+ within 1.10.x)."
+        _pin_meson
     else
-        log_ok "meson ${_meson_maj}.${_meson_min} is compatible — no pin needed"
+        log_ok "meson ${_meson_maj}.${_meson_min}.${_meson_pat} is compatible, no pin needed"
         export MESON
     fi
 else
-    die "meson not found at $MESON after brew install. Set MESON to the correct path."
+    _pin_meson
 fi
 
 # ---------------------------------------------------------------------------
@@ -185,6 +193,7 @@ else
         -DLLVM_INCLUDE_TESTS=OFF \
         -DLLVM_INCLUDE_EXAMPLES=OFF \
         -DLLVM_ENABLE_RTTI=ON \
+        -DLLVM_ENABLE_ZSTD=OFF \
         -DCMAKE_BUILD_TYPE=Release \
         "-DCMAKE_OSX_ARCHITECTURES=x86_64" \
         "-DCMAKE_INSTALL_PREFIX=$LLVM_PREFIX"
@@ -222,14 +231,20 @@ else
     fi
 
     log_info "Extracting Wine toolchain"
-    tar -xzf "$_wine_tarball" -C "$_tc_parent"
-
-    # The tarball may extract to a versioned directory (e.g. wine-8.16-3shain).
-    # Normalise it to the expected name.
-    _extracted=$(find "$_tc_parent" -mindepth 1 -maxdepth 1 -type d -name 'wine-*' | head -n1)
-    if [[ -n "$_extracted" && "$_extracted" != "$WINE_TOOLCHAIN" ]]; then
+    # Extract into a scratch dir first: depending on the release, the
+    # tarball is either flat (./bin, ./lib, ...) or wrapped in a
+    # versioned directory (e.g. wine-8.16-3shain/). Handle both.
+    _tc_tmp="$_tc_parent/.wine-extract"
+    rm -rf "$_tc_tmp" && mkdir -p "$_tc_tmp"
+    tar -xzf "$_wine_tarball" -C "$_tc_tmp"
+    rm -rf "$WINE_TOOLCHAIN"
+    if [[ -d "$_tc_tmp/bin" ]]; then
+        mv "$_tc_tmp" "$WINE_TOOLCHAIN"
+    else
+        _extracted=$(find "$_tc_tmp" -mindepth 1 -maxdepth 1 -type d | head -n1)
+        [[ -n "$_extracted" ]] || die "Wine toolchain tarball was empty"
         mv "$_extracted" "$WINE_TOOLCHAIN"
-        log_ok "Renamed $(basename "$_extracted") -> wine"
+        rm -rf "$_tc_tmp"
     fi
 
     [[ -x "$WINE_TOOLCHAIN/bin/winebuild" ]] \
