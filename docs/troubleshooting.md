@@ -319,6 +319,23 @@ Re-run scripts/03-install-steam.sh to recover.
 4. Once the bootstrap dialog reports "Verification complete", quit
    Steam and rerun `scripts/06-install-wrapper.sh`.
 
+## Install fails on newer toolchains (macOS 26, Homebrew 2026, GCC 16)
+
+Tested on an M2 MacBook Air, macOS 26.2, Homebrew 7.0.6, mingw-w64 GCC 16.2,
+Apple clang 21. The installer now handles the following automatically; they
+are listed here so the error messages are searchable.
+
+| Symptom | Cause | Handling |
+|---|---|---|
+| `brew install --cask wine-stable` fails / cask disabled | Homebrew disabled the cask (Gatekeeper) in Sept 2026 | `01-install-wine.sh` falls back to the Gcenx release tarball (skips gstreamer-runtime) |
+| `KeyError: ... build.cpp_importstd` during `meson setup` | Bug in meson 1.10.0/1.10.1 | `07` pins meson 1.10.2 via a standalone download |
+| `pip install --user meson` fails | Homebrew Python 3.14 is externally managed | Same: standalone meson download, no pip |
+| `winebuild not found at .../toolchains/wine/bin/winebuild` | 3Shain toolchain tarball extracts flat | `07` handles flat and nested layouts |
+| `Undefined symbols ... _ZSTD_compress` linking `airconv` / `winemetal.so` | LLVM auto-detects Homebrew's arm64-only zstd | `07` builds LLVM with `-DLLVM_ENABLE_ZSTD=OFF` (delete `toolchains/llvm` to rebuild) |
+| `redefinition of '_OSSwapInt16'` in `tools/makedep.c` | Xcode clang emits arm64 under `arch -x86_64` | `08` passes `CC='clang -arch x86_64'` explicitly |
+| `'setfill' is not a member of 'std'` in `com_guid.cpp` | GCC 16 no longer includes `<iomanip>` transitively | Needs `#include <iomanip>` in the DXMT fork (already present in 3Shain/dxmt main) |
+| `06-install-wrapper.sh` can't find `bin/cef` | Steam hasn't bootstrapped its CEF directory yet | Launch Steam once with `scripts/launch-steam.sh`, quit it, re-run `install.sh` |
+
 ## Still blank: enable wrapper debug log
 
 Set `STEAMWEBHELPER_WRAPPER_DEBUG=1` in the environment Wine sees. The
