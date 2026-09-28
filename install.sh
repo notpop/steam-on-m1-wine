@@ -16,6 +16,13 @@
 # for testing the CEF side without waiting on the long builds. The
 # user can always run `bash install.sh` later to complete the stack.
 #
+# --prebuilt
+# ----------
+# Same result as full mode, but downloads a prebuilt DXMT fork +
+# patched winemac.so bundle (scripts/07p-install-prebuilt.sh) instead
+# of running scripts/07 and 08. Takes minutes instead of ~1.5 hours and
+# skips the LLVM, meson, and Wine source builds entirely.
+#
 # Every step is idempotent; safe to re-run at any point.
 #
 # Env overrides (all optional)
@@ -36,8 +43,10 @@ require_macos_arm64
 MODE="full"
 if [[ "${1:-}" == "--minimal" ]]; then
     MODE="minimal"
+elif [[ "${1:-}" == "--prebuilt" ]]; then
+    MODE="prebuilt"
 elif [[ -n "${1:-}" ]]; then
-    die "Unknown argument: $1 (use --minimal, or no arguments for full)"
+    die "Unknown argument: $1 (use --minimal, --prebuilt, or no arguments for full)"
 fi
 
 log_step "steam-on-m1-wine installer ($MODE mode)"
@@ -53,6 +62,12 @@ if [[ "$MODE" == "full" ]]; then
     log_info ""
     log_info "If you only need the Steam UI (no D3D11 games) and want to"
     log_info "stop after a few minutes, run:  bash install.sh --minimal"
+    log_info ""
+    log_info "To skip the source builds entirely, run:  bash install.sh --prebuilt"
+elif [[ "$MODE" == "prebuilt" ]]; then
+    log_info "Prebuilt mode runs scripts/00 through 06, then downloads the"
+    log_info "prebuilt DXMT + winemac.so bundle instead of building it."
+    log_info "Expect a few minutes plus a sudo prompt for the Wine bundle."
 else
     log_info "Minimal mode runs scripts/00 through 06 + 09 only. The Steam"
     log_info "UI will boot; D3D11 games will show transparent windows."
@@ -75,10 +90,14 @@ d3d11_steps=(
     scripts/08-patch-wine-visibility.sh
 )
 
+prebuilt_step=scripts/07p-install-prebuilt.sh
+
 app_step=scripts/09-install-macos-app.sh
 
 if [[ "$MODE" == "full" ]]; then
     steps=("${core_steps[@]}" "${d3d11_steps[@]}" "$app_step")
+elif [[ "$MODE" == "prebuilt" ]]; then
+    steps=("${core_steps[@]}" "$prebuilt_step" "$app_step")
 else
     steps=("${core_steps[@]}" "$app_step")
 fi
