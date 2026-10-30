@@ -72,6 +72,10 @@ if (( _SKIP_TO_COPY == 0 )); then
         fi
     done
 
+    # bison and flex are keg-only in Homebrew, so configure would otherwise
+    # find the macOS bison 2.3 and stop ("bison version is too old").
+    export PATH="$HOMEBREW_PREFIX/opt/bison/bin:$HOMEBREW_PREFIX/opt/flex/bin:$PATH"
+
     # -- Step 2: Clone or update Wine source ----------------------------------
 
     log_step "Preparing Wine source ($WINE_BUILD_BRANCH)"
