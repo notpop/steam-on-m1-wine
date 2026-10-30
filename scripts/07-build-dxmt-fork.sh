@@ -149,6 +149,19 @@ log_info "Updating git submodules"
 git -C "$DXMT_SRC" submodule update --init --recursive
 log_ok "Submodules ready"
 
+# The fork predates GCC 16 and the Xcode 27 Metal compiler; patches/dxmt
+# holds the source fixes it needs. Apply each one unless already applied.
+for _patch in "$REPO_ROOT"/patches/dxmt/*.patch; do
+    [[ -f "$_patch" ]] || continue
+    if git -C "$DXMT_SRC" apply --reverse --check "$_patch" 2>/dev/null; then
+        log_ok "Patch already applied: $(basename "$_patch")"
+    else
+        git -C "$DXMT_SRC" apply "$_patch" \
+            || die "Failed to apply $(basename "$_patch") to $DXMT_SRC"
+        log_ok "Applied patch: $(basename "$_patch")"
+    fi
+done
+
 # ---------------------------------------------------------------------------
 # Step 4 — x86_64 LLVM 15 at $LLVM_PREFIX
 # ---------------------------------------------------------------------------
