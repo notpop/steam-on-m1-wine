@@ -157,6 +157,29 @@ with open(path, 'w', encoding='utf-8', errors='surrogateescape') as f:
 PYEOF
         log_ok "Set AllowImmovableWindows=n (virtual desktop window becomes draggable)"
     fi
+
+    # -- 2e. Wine Mac Driver: Cmd acts as Ctrl ---------------------------------
+    # Windows apps expect Ctrl+C / Ctrl+V, so Cmd+V does nothing in the Steam
+    # login form. Map both Command keys to Ctrl. Opt out with MAC_CMD_AS_CTRL=0.
+    # (dlls/winemac.drv/macdrv_main.c: `left_command_is_ctrl`)
+    if [[ "${MAC_CMD_AS_CTRL:-1}" == "1" ]] && ! grep -q '"LeftCommandIsCtrl"' "$USER_REG"; then
+        python3 - "$USER_REG" <<'PYEOF'
+import sys, re
+path = sys.argv[1]
+with open(path, 'r', encoding='utf-8', errors='surrogateescape') as f:
+    data = f.read()
+keys = '"LeftCommandIsCtrl"="y"\n"RightCommandIsCtrl"="y"\n'
+section_re = re.compile(r'^\[Software\\\\Wine\\\\Mac Driver\][^\n]*\n', re.MULTILINE)
+m = section_re.search(data)
+if m:
+    data = data[:m.end()] + keys + data[m.end():]
+else:
+    data = data.rstrip() + '\n\n[Software\\\\Wine\\\\Mac Driver]\n' + keys
+with open(path, 'w', encoding='utf-8', errors='surrogateescape') as f:
+    f.write(data)
+PYEOF
+        log_ok "Set LeftCommandIsCtrl/RightCommandIsCtrl=y (Cmd+C/Cmd+V work in Steam)"
+    fi
 fi
 
 # -- 3. Build launch environment ---------------------------------------------

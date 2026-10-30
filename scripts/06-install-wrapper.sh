@@ -43,7 +43,12 @@ log_ok "Built $WRAPPER_BIN ($(wc -c < "$WRAPPER_BIN" | tr -d ' ') bytes)"
 # -- Install into each cef.winXXX dir -----------------------------------------
 STEAM_CEF_ROOT="$WINEPREFIX/drive_c/Program Files (x86)/Steam/bin/cef"
 if [[ ! -d "$STEAM_CEF_ROOT" ]]; then
-    die "Steam CEF directory not found at $STEAM_CEF_ROOT — run 03-install-steam.sh first."
+    # A fresh install only has the bootstrapper; Steam downloads bin/cef on
+    # its first launch. scripts/launch-steam.sh redeploys the wrapper on every
+    # later launch, so skip here instead of failing install.sh.
+    log_warn "Steam CEF directory not found at $STEAM_CEF_ROOT (fresh install)."
+    log_warn "Launch Steam once so it downloads CEF; the next launch installs the wrapper."
+    exit 0
 fi
 
 wrapper_size=$(stat -f%z "$WRAPPER_BIN")
