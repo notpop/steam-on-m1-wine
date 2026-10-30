@@ -190,7 +190,7 @@ else
         "-DCMAKE_INSTALL_PREFIX=$LLVM_PREFIX"
 
     log_info "cmake build (this takes ~30 min)"
-    cmake --build "$_llvm_build_dir"
+    cmake --build "$_llvm_build_dir" --parallel "$BUILD_JOBS"
 
     log_info "cmake install"
     cmake --install "$_llvm_build_dir"

@@ -118,7 +118,7 @@ if (( _SKIP_TO_COPY == 0 )); then
 
     log_step "Building dlls/winemac.drv/winemac.so"
 
-    ncpu=$(sysctl -n hw.logicalcpu)
+    ncpu=$BUILD_JOBS
 
     log_info "Attempting targeted build (dlls/winemac.drv/winemac.so) with -j${ncpu}"
     if arch -x86_64 make -C "$WINE_BUILD_SRC/build" \
@@ -154,11 +154,17 @@ log_ok "Built winemac.so has $built_pub_count public symbols — looks correct."
 
 log_step "Installing patched winemac.so into Wine bundle"
 
+# A Wine bundle in ~/Applications is user-writable; only /Applications needs sudo.
+as_root=""
+if [[ ! -w "$WINE_UNIX_DIR" || ! -w "$installed_so" ]]; then
+    as_root="sudo"
+    log_warn "sudo may prompt for your password ($WINE_UNIX_DIR is not writable)."
+fi
+
 backup="$WINE_UNIX_DIR/winemac.so.gcenx-backup"
 if [[ ! -f "$backup" ]]; then
     log_info "Creating backup of Gcenx-shipped winemac.so"
-    log_warn "sudo may prompt for your password (Wine bundle is under /Applications)."
-    sudo cp "$installed_so" "$backup" \
+    $as_root cp "$installed_so" "$backup" \
         || die "Failed to create backup at $backup"
     log_ok "Backup saved: $backup"
 else
@@ -166,8 +172,7 @@ else
 fi
 
 log_info "Copying patched winemac.so into $WINE_UNIX_DIR"
-log_warn "sudo may prompt for your password."
-sudo cp "$built_so" "$installed_so" \
+$as_root cp "$built_so" "$installed_so" \
     || die "Failed to copy patched winemac.so to $installed_so"
 log_ok "Installed patched winemac.so"
 

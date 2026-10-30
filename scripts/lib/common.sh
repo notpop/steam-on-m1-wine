@@ -64,6 +64,9 @@ export HOMEBREW_PREFIX
 export PATH="$HOMEBREW_PREFIX/bin:$PATH"
 
 : "${WINE_APP:=/Applications/Wine Stable.app}"
+# Parallel compile jobs for steps 07 and 08. LLVM release jobs take ~1 GB RAM
+# each, so stay below the core count on 16-24 GB machines.
+: "${BUILD_JOBS:=6}"
 : "${WINE_BIN:=$WINE_APP/Contents/Resources/wine/bin/wine}"
 : "${WINESERVER_BIN:=$WINE_APP/Contents/Resources/wine/bin/wineserver}"
 : "${WINEPREFIX:=$HOME/.wine-steam}"
